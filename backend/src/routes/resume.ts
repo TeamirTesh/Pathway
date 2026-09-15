@@ -9,6 +9,7 @@ import {
   getBuiltinTemplate,
   isBuiltinTemplateId,
 } from "../lib/resumeTemplates";
+import { compileLatex } from "../lib/latexCompile";
 
 export const resumeRouter = Router();
 resumeRouter.use(requireAuth);
@@ -45,29 +46,6 @@ const EMPTY_PROFILE = {
   sections: [],
   updatedAt: null,
 };
-
-// --- LaTeX compile service ---------------------------------------------------
-
-const COMPILE_URL = "https://latex.ytotech.com/builds/sync";
-
-type CompileResult = { ok: true; pdf: Buffer } | { ok: false; log: string };
-
-async function compileLatex(latex: string): Promise<CompileResult> {
-  const compileRes = await fetch(COMPILE_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      compiler: "pdflatex",
-      resources: [{ main: true, content: latex }],
-    }),
-  });
-
-  if (!compileRes.ok) {
-    const log = await compileRes.text().catch(() => "");
-    return { ok: false, log };
-  }
-  return { ok: true, pdf: Buffer.from(await compileRes.arrayBuffer()) };
-}
 
 // --- Profile ---------------------------------------------------------------
 
@@ -318,7 +296,7 @@ resumeRouter.post("/generate", async (req: Request, res: Response) => {
       }
     }
   } catch {
-    warnings.push("Couldn't verify that the generated LaTeX compiles (the compile service was unreachable).");
+    warnings.push("Couldn't verify that the generated LaTeX compiles (the LaTeX compiler was unavailable).");
   }
 
   const count = await prisma.resumeVersion.count({ where: { userId } });
@@ -359,6 +337,6 @@ resumeRouter.post("/render-pdf", async (req: Request, res: Response) => {
     res.send(result.pdf);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Failed to reach LaTeX compile service" });
+    res.status(500).json({ error: "The LaTeX compiler is unavailable" });
   }
 });

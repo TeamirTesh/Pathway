@@ -62,8 +62,8 @@ Sign up with email and password or Google, and use either method interchangeably
 └── backend/                Express API
     ├── prisma/             Database schema and migrations
     └── src/
-        ├── routes/         auth, applications, status-events, users, gmail
-        ├── lib/             Gmail scanning pipeline, Claude client, encryption, Prisma client
+        ├── routes/         auth, applications, status-events, users, gmail, resume
+        ├── lib/             Gmail scanning pipeline, Claude client, LaTeX compilation, encryption, Prisma client
         └── middleware/      Auth middleware
 ```
 
@@ -74,6 +74,11 @@ Sign up with email and password or Google, and use either method interchangeably
 - A PostgreSQL database
 - A Google Cloud OAuth client (for login and Gmail access)
 - An Anthropic API key
+- [Tectonic](https://tectonic-typesetting.github.io/en-US/install.html) (LaTeX compiler used by the resume workshop) — install via the official installer:
+  ```bash
+  curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
+  ```
+  or your OS package manager (`brew install tectonic` on macOS), then confirm it resolves: `tectonic --version`. Only needed for local dev if you want working resume PDF previews — everything else runs without it. Not required if you're running the backend via the provided `backend/Dockerfile`, which bundles it.
 
 ### Backend setup
 
@@ -82,7 +87,7 @@ cd backend
 npm install
 ```
 
-Create a `.env` file with:
+Create a `.env` file (see `backend/.env.example` for the full list, including optional LaTeX-compile tuning vars):
 
 ```
 DATABASE_URL=postgresql://...
