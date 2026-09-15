@@ -2,11 +2,13 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth, AuthRequest } from "../middleware/requireAuth";
-import { profileSchema } from "../lib/resumeSchemas";
-import { generateSelectionDescriptor, LlmGenerationError } from "../lib/llm";
-import { resolveSelection, ResolveSelectionError } from "../lib/resolveSelection";
-import { escapeDeep } from "../lib/latexEscape";
-import { renderResumeTemplate } from "../lib/latexTemplate";
+import { profileSchema, PROFILE_CONTENT_KEYS } from "../lib/resumeSchemas";
+import { generateTailoredResume, repairResumeLatex, LlmGenerationError } from "../lib/llm";
+import {
+  BUILTIN_TEMPLATES,
+  getBuiltinTemplate,
+  isBuiltinTemplateId,
+} from "../lib/resumeTemplates";
 
 export const resumeRouter = Router();
 resumeRouter.use(requireAuth);
@@ -25,8 +27,8 @@ const updateSchema = z.object({
 
 const generateSchema = z.object({
   jobDescription: z.string().min(1),
+  templateId: z.string().min(1),
   targetRole: z.string().optional(),
-  contactVariantHint: z.string().optional(),
   label: z.string().optional(),
 });
 
@@ -40,8 +42,34 @@ const EMPTY_PROFILE = {
   projects: [],
   involvement: [],
   education: [],
+  sections: [],
   updatedAt: null,
 };
+
+// --- LaTeX compile service ---------------------------------------------------
+
+const COMPILE_URL = "https://latex.ytotech.com/builds/sync";
+
+type CompileResult = { ok: true; pdf: Buffer } | { ok: false; log: string };
+
+async function compileLatex(latex: string): Promise<CompileResult> {
+  const compileRes = await fetch(COMPILE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      compiler: "pdflatex",
+      resources: [{ main: true, content: latex }],
+    }),
+  });
+
+  if (!compileRes.ok) {
+    const log = await compileRes.text().catch(() => "");
+    return { ok: false, log };
+  }
+  return { ok: true, pdf: Buffer.from(await compileRes.arrayBuffer()) };
+}
+
+// --- Profile ---------------------------------------------------------------
 
 resumeRouter.get("/profile", async (req: Request, res: Response) => {
   const { userId } = req as AuthRequest;
@@ -64,6 +92,109 @@ resumeRouter.put("/profile", async (req: Request, res: Response) => {
   });
   res.json(profile);
 });
+
+// --- Templates -----------------------------------------------------------------
+
+const templateBodySchema = z.object({
+  name: z.string().trim().min(1, "Give the template a name"),
+  latexSource: z.string().min(1, "Paste the template's LaTeX source"),
+});
+
+function looksLikeLatexDoc(s: string): boolean {
+  return (
+    s.includes("\\documentclass") &&
+    s.includes("\\begin{document}") &&
+    s.includes("\\end{document}")
+  );
+}
+
+const NOT_A_DOC =
+  "That doesn't look like a full LaTeX document — it needs \\documentclass and a \\begin{document} … \\end{document} body.";
+
+function templateJson(row: { id: string; name: string; latexSource: string }) {
+  return { id: row.id, name: row.name, latexSource: row.latexSource, builtin: false };
+}
+
+resumeRouter.get("/templates", async (req: Request, res: Response) => {
+  const { userId } = req as AuthRequest;
+  const rows = await prisma.resumeTemplate.findMany({
+    where: { userId },
+    orderBy: { createdAt: "asc" },
+  });
+  res.json([...BUILTIN_TEMPLATES, ...rows.map(templateJson)]);
+});
+
+resumeRouter.post("/templates", async (req: Request, res: Response) => {
+  const { userId } = req as AuthRequest;
+  const parsed = templateBodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0].message });
+    return;
+  }
+  if (!looksLikeLatexDoc(parsed.data.latexSource)) {
+    res.status(400).json({ error: NOT_A_DOC });
+    return;
+  }
+  const row = await prisma.resumeTemplate.create({ data: { userId, ...parsed.data } });
+  res.status(201).json(templateJson(row));
+});
+
+resumeRouter.patch("/templates/:id", async (req: Request, res: Response) => {
+  const { userId } = req as AuthRequest;
+  if (isBuiltinTemplateId(req.params.id)) {
+    res.status(403).json({ error: "Built-in templates can't be edited." });
+    return;
+  }
+  const parsed = templateBodySchema.partial().safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0].message });
+    return;
+  }
+  if (parsed.data.latexSource !== undefined && !looksLikeLatexDoc(parsed.data.latexSource)) {
+    res.status(400).json({ error: NOT_A_DOC });
+    return;
+  }
+  const existing = await prisma.resumeTemplate.findUnique({ where: { id: req.params.id } });
+  if (!existing || existing.userId !== userId) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  const row = await prisma.resumeTemplate.update({
+    where: { id: req.params.id },
+    data: parsed.data,
+  });
+  res.json(templateJson(row));
+});
+
+resumeRouter.delete("/templates/:id", async (req: Request, res: Response) => {
+  const { userId } = req as AuthRequest;
+  if (isBuiltinTemplateId(req.params.id)) {
+    res.status(403).json({ error: "Built-in templates can't be deleted." });
+    return;
+  }
+  const existing = await prisma.resumeTemplate.findUnique({ where: { id: req.params.id } });
+  if (!existing || existing.userId !== userId) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  await prisma.resumeTemplate.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+
+async function resolveTemplate(
+  id: string,
+  userId: string,
+): Promise<{ source: string; name: string } | null> {
+  if (isBuiltinTemplateId(id)) {
+    const b = getBuiltinTemplate(id);
+    return b ? { source: b.latexSource, name: b.name } : null;
+  }
+  const row = await prisma.resumeTemplate.findUnique({ where: { id } });
+  if (!row || row.userId !== userId) return null;
+  return { source: row.latexSource, name: row.name };
+}
+
+// --- Resume versions ---------------------------------------------------------
 
 async function getVersionForUser(id: string, userId: string, res: Response) {
   const version = await prisma.resumeVersion.findUnique({ where: { id } });
@@ -135,19 +266,32 @@ resumeRouter.post("/generate", async (req: Request, res: Response) => {
     res.status(400).json({ error: parsed.error.issues[0].message });
     return;
   }
-  const { jobDescription, targetRole, contactVariantHint, label } = parsed.data;
+  const { jobDescription, templateId, targetRole, label } = parsed.data;
 
   const profileRow = await prisma.resumeProfile.findUnique({ where: { userId } });
   const profile = profileSchema.parse(profileRow ?? {});
-  const isEmpty = Object.values(profile).every((section) => Array.isArray(section) && section.length === 0);
+  const isEmpty = PROFILE_CONTENT_KEYS.every((key) => profile[key].length === 0);
   if (isEmpty) {
     res.status(422).json({ error: "Complete your resume profile before generating a tailored resume." });
     return;
   }
 
-  let descriptor;
+  const template = await resolveTemplate(templateId, userId);
+  if (!template) {
+    res.status(422).json({ error: "Select a template before generating a resume." });
+    return;
+  }
+
+  const warnings: string[] = [];
+  let latexSource: string;
+  let jobTitle: string;
   try {
-    descriptor = await generateSelectionDescriptor({ profile, jobDescription, contactVariantHint, targetRole });
+    ({ latexSource, jobTitle } = await generateTailoredResume({
+      profile,
+      jobDescription,
+      templateSource: template.source,
+      targetRole,
+    }));
   } catch (err) {
     if (err instanceof LlmGenerationError) {
       res.status(502).json({ error: err.message });
@@ -156,29 +300,37 @@ resumeRouter.post("/generate", async (req: Request, res: Response) => {
     throw err;
   }
 
-  let job, warnings;
+  // Best-effort: verify the output compiles, with one AI repair attempt.
   try {
-    ({ job, warnings } = resolveSelection(profile, descriptor));
-  } catch (err) {
-    if (err instanceof ResolveSelectionError) {
-      res.status(422).json({ error: err.message });
-      return;
+    let compiled = await compileLatex(latexSource);
+    if (!compiled.ok) {
+      try {
+        const repaired = await repairResumeLatex({ latexSource, compileLog: compiled.log });
+        latexSource = repaired.latexSource;
+        compiled = await compileLatex(latexSource);
+      } catch {
+        // keep the pre-repair source
+      }
+      if (!compiled.ok) {
+        warnings.push(
+          'The generated LaTeX did not compile cleanly. Open "Edit LaTeX" to fix it — the compiler error shows in the preview pane.',
+        );
+      }
     }
-    throw err;
+  } catch {
+    warnings.push("Couldn't verify that the generated LaTeX compiles (the compile service was unreachable).");
   }
-
-  const escapedJob = escapeDeep(job);
-  const latexSource = renderResumeTemplate(escapedJob);
 
   const count = await prisma.resumeVersion.count({ where: { userId } });
   const version = await prisma.resumeVersion.create({
     data: {
       userId,
-      label: label ?? `v${count + 1} — ${descriptor.jobTitle}`,
+      label: label ?? `v${count + 1} — ${jobTitle}`,
       latexSource,
       targetRole,
       jobDescription,
-      selectionDescriptor: descriptor,
+      templateId,
+      templateName: template.name,
     },
   });
 
@@ -197,25 +349,14 @@ resumeRouter.post("/render-pdf", async (req: Request, res: Response) => {
   }
 
   try {
-    const compileRes = await fetch("https://latex.ytotech.com/builds/sync", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        compiler: "pdflatex",
-        resources: [{ main: true, content: parsed.data.latex }],
-      }),
-    });
-
-    if (!compileRes.ok) {
-      const errText = await compileRes.text();
-      console.error("LaTeX compile error:", errText);
-      res.status(422).json({ error: "Failed to compile LaTeX to PDF" });
+    const result = await compileLatex(parsed.data.latex);
+    if (!result.ok) {
+      console.error("LaTeX compile error:", result.log);
+      res.status(422).json({ error: "Failed to compile LaTeX to PDF", log: result.log.slice(0, 4000) });
       return;
     }
-
-    const pdfBuffer = Buffer.from(await compileRes.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
-    res.send(pdfBuffer);
+    res.send(result.pdf);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to reach LaTeX compile service" });

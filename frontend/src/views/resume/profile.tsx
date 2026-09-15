@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ArrowLeft, Plus, Trash2, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, Eye, EyeOff, Plus, Trash2, X } from "lucide-react";
 import {
   api,
+  ContactLink,
   ContactVariant,
   EducationEntry,
   ExperienceEntry,
@@ -11,6 +12,8 @@ import {
   ProjectEntry,
   ResearchEntry,
   ResumeProfile,
+  SectionKind,
+  SectionMeta,
   SkillCategory,
   SummaryVariant,
 } from "@/lib/api";
@@ -28,6 +31,66 @@ function removeAt<T>(arr: T[], i: number): T[] {
   return arr.filter((_, idx) => idx !== i);
 }
 
+function move<T>(arr: T[], from: number, to: number): T[] {
+  if (from === to || to < 0 || to >= arr.length || from < 0 || from >= arr.length) {
+    return arr;
+  }
+  const copy = [...arr];
+  const [item] = copy.splice(from, 1);
+  copy.splice(to, 0, item);
+  return copy;
+}
+
+// Default section order and headings. `contact` is the resume header and is
+// not part of this list. "Leadership" is the heading for the `involvement`
+// section by default; every title here is editable.
+const SECTION_ORDER: SectionKind[] = [
+  "education",
+  "experience",
+  "projects",
+  "skills",
+  "involvement",
+  "summary",
+  "research",
+];
+
+const SECTION_TITLES: Record<SectionKind, string> = {
+  summary: "Summary",
+  education: "Education",
+  experience: "Experience",
+  projects: "Projects",
+  skills: "Skills",
+  involvement: "Leadership",
+  research: "Research",
+};
+
+// The stored `sections` array may be empty (new profile), stale, or missing
+// kinds. Produce a complete, de-duplicated, ordered list: honor whatever order
+// and settings are stored, then append any kinds that weren't listed in the
+// default order.
+function normalizeSections(raw: SectionMeta[] | undefined | null): SectionMeta[] {
+  const known = new Set<SectionKind>(SECTION_ORDER);
+  const seen = new Set<SectionKind>();
+  const result: SectionMeta[] = [];
+
+  for (const s of raw ?? []) {
+    if (s && known.has(s.kind) && !seen.has(s.kind)) {
+      seen.add(s.kind);
+      result.push({
+        kind: s.kind,
+        title: typeof s.title === "string" && s.title.trim() ? s.title : SECTION_TITLES[s.kind],
+        visible: s.visible !== false,
+      });
+    }
+  }
+  for (const kind of SECTION_ORDER) {
+    if (!seen.has(kind)) {
+      result.push({ kind, title: SECTION_TITLES[kind], visible: true });
+    }
+  }
+  return result;
+}
+
 export function ResumeProfileEditor() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
@@ -42,7 +105,7 @@ export function ResumeProfileEditor() {
   useEffect(() => {
     if (data && !loadedRef.current) {
       const { id: _id, updatedAt: _updatedAt, ...rest } = data;
-      setForm(rest);
+      setForm({ ...rest, sections: normalizeSections(rest.sections) });
       loadedRef.current = true;
     }
   }, [data]);
@@ -64,6 +127,13 @@ export function ResumeProfileEditor() {
     );
   }
 
+  const sections = form.sections;
+
+  const setSectionMeta = (i: number, patch: Partial<SectionMeta>) =>
+    setForm({ ...form, sections: updateAt(sections, i, { ...sections[i], ...patch }) });
+  const moveSection = (from: number, to: number) =>
+    setForm({ ...form, sections: move(sections, from, to) });
+
   return (
     <div className="min-h-screen">
       <header className="flex h-14 items-center justify-between border-b border-border px-5">
@@ -84,42 +154,69 @@ export function ResumeProfileEditor() {
 
       <div className="mx-auto max-w-3xl space-y-6 p-6">
         <p className="text-xs text-text-secondary">
-          This is the master list of everything you might put on a resume. When you tailor a resume
-          to a specific role, it draws only from what's here — content is never invented, only
-          selected and reordered.
+          This is the master list of everything you might put on a resume. Reorder sections with the
+          arrows, rename a section to change its heading, and hide the ones you don't want on a
+          generated resume. Add multiple entries to a section and reorder those too. When you tailor
+          a resume, content is never invented — only selected and reordered.
         </p>
 
         <Section title="Contact">
           <ContactVariantsEditor contact={form.contact} onChange={(contact) => setForm({ ...form, contact })} />
         </Section>
 
-        <Section title="Summary">
-          <SummaryVariantsEditor summary={form.summary} onChange={(summary) => setForm({ ...form, summary })} />
-        </Section>
-
-        <Section title="Skills">
-          <SkillsEditor skills={form.skills} onChange={(skills) => setForm({ ...form, skills })} />
-        </Section>
-
-        <ExperienceEditor experience={form.experience} onChange={(experience) => setForm({ ...form, experience })} />
-
-        <ResearchEditor research={form.research} onChange={(research) => setForm({ ...form, research })} />
-
-        <NameDescriptionEditor
-          title="Projects"
-          entryLabel="project"
-          entries={form.projects}
-          onChange={(projects) => setForm({ ...form, projects })}
-        />
-
-        <NameDescriptionEditor
-          title="Involvement"
-          entryLabel="activity"
-          entries={form.involvement}
-          onChange={(involvement) => setForm({ ...form, involvement })}
-        />
-
-        <EducationEditor education={form.education} onChange={(education) => setForm({ ...form, education })} />
+        {sections.map((meta, idx) => (
+          <SectionCard
+            key={meta.kind}
+            meta={meta}
+            index={idx}
+            count={sections.length}
+            onTitle={(title) => setSectionMeta(idx, { title })}
+            onToggle={() => setSectionMeta(idx, { visible: !meta.visible })}
+            onMove={moveSection}
+          >
+            {meta.kind === "summary" && (
+              <SummaryVariantsEditor
+                summary={form.summary}
+                onChange={(summary) => setForm({ ...form, summary })}
+              />
+            )}
+            {meta.kind === "education" && (
+              <EducationEditor
+                education={form.education}
+                onChange={(education) => setForm({ ...form, education })}
+              />
+            )}
+            {meta.kind === "experience" && (
+              <ExperienceEditor
+                experience={form.experience}
+                onChange={(experience) => setForm({ ...form, experience })}
+              />
+            )}
+            {meta.kind === "projects" && (
+              <NameDescriptionEditor
+                entryLabel="project"
+                entries={form.projects}
+                onChange={(projects) => setForm({ ...form, projects })}
+              />
+            )}
+            {meta.kind === "skills" && (
+              <SkillsEditor skills={form.skills} onChange={(skills) => setForm({ ...form, skills })} />
+            )}
+            {meta.kind === "involvement" && (
+              <NameDescriptionEditor
+                entryLabel="entry"
+                entries={form.involvement}
+                onChange={(involvement) => setForm({ ...form, involvement })}
+              />
+            )}
+            {meta.kind === "research" && (
+              <ResearchEditor
+                research={form.research}
+                onChange={(research) => setForm({ ...form, research })}
+              />
+            )}
+          </SectionCard>
+        ))}
       </div>
 
       <style>{`.input { background: var(--background); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none; color: var(--foreground); }
@@ -129,6 +226,7 @@ export function ResumeProfileEditor() {
       .chip button:hover { color: var(--foreground); }
       .icon-btn { color: var(--text-tertiary); padding: 4px; border-radius: 6px; }
       .icon-btn:hover { color: var(--foreground); background: var(--surface); }
+      .icon-btn:disabled { opacity: 0.25; pointer-events: none; }
       .add-btn { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-secondary); border: 1px dashed var(--border); border-radius: 6px; padding: 6px 10px; }
       .add-btn:hover { color: var(--foreground); border-color: var(--border-strong); }`}</style>
     </div>
@@ -140,6 +238,110 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div className="rounded-lg border border-border bg-surface p-5">
       <h2 className="mb-4 text-sm font-semibold">{title}</h2>
       {children}
+    </div>
+  );
+}
+
+// A reorderable, retitleable, hideable section shell. The `title` becomes the
+// heading on the generated resume; `visible` controls whether it's included.
+function SectionCard({
+  meta,
+  index,
+  count,
+  onTitle,
+  onToggle,
+  onMove,
+  children,
+}: {
+  meta: SectionMeta;
+  index: number;
+  count: number;
+  onTitle: (title: string) => void;
+  onToggle: () => void;
+  onMove: (from: number, to: number) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`rounded-lg border bg-surface p-5 ${meta.visible ? "border-border" : "border-dashed border-border"}`}
+    >
+      <div className="mb-4 flex items-center gap-2">
+        <div className="flex shrink-0 items-center">
+          <button
+            type="button"
+            className="icon-btn"
+            disabled={index === 0}
+            onClick={() => onMove(index, index - 1)}
+            aria-label="Move section up"
+          >
+            <ChevronUp className="size-4" />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            disabled={index === count - 1}
+            onClick={() => onMove(index, index + 1)}
+            aria-label="Move section down"
+          >
+            <ChevronDown className="size-4" />
+          </button>
+        </div>
+        <input
+          className="input flex-1 text-sm font-semibold"
+          value={meta.title}
+          onChange={(e) => onTitle(e.target.value)}
+          placeholder="Section heading"
+        />
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-pressed={meta.visible}
+          className="flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-text-secondary hover:border-border-strong"
+        >
+          {meta.visible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+          {meta.visible ? "Shown" : "Hidden"}
+        </button>
+      </div>
+      <div className={meta.visible ? "" : "opacity-60"}>{children}</div>
+    </div>
+  );
+}
+
+// Reorder-up / reorder-down / delete cluster for a single entry within a section.
+function EntryControls({
+  index,
+  count,
+  onMove,
+  onRemove,
+}: {
+  index: number;
+  count: number;
+  onMove: (from: number, to: number) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-0.5">
+      <button
+        type="button"
+        className="icon-btn"
+        disabled={index === 0}
+        onClick={() => onMove(index, index - 1)}
+        aria-label="Move entry up"
+      >
+        <ChevronUp className="size-3.5" />
+      </button>
+      <button
+        type="button"
+        className="icon-btn"
+        disabled={index === count - 1}
+        onClick={() => onMove(index, index + 1)}
+        aria-label="Move entry down"
+      >
+        <ChevronDown className="size-3.5" />
+      </button>
+      <button type="button" onClick={onRemove} className="icon-btn" aria-label="Remove entry">
+        <Trash2 className="size-3.5" />
+      </button>
     </div>
   );
 }
@@ -176,6 +378,7 @@ function SkillsEditor({
   const updateCategory = (i: number, category: string) =>
     onChange(updateAt(skills, i, { ...skills[i], category }));
   const removeCategory = (i: number) => onChange(removeAt(skills, i));
+  const moveCategory = (from: number, to: number) => onChange(move(skills, from, to));
   const addItem = (i: number, item: string) =>
     onChange(updateAt(skills, i, { ...skills[i], items: [...skills[i].items, item] }));
   const removeItem = (i: number, j: number) =>
@@ -192,9 +395,12 @@ function SkillsEditor({
               value={cat.category}
               onChange={(e) => updateCategory(i, e.target.value)}
             />
-            <button onClick={() => removeCategory(i)} className="icon-btn">
-              <Trash2 className="size-3.5" />
-            </button>
+            <EntryControls
+              index={i}
+              count={skills.length}
+              onMove={moveCategory}
+              onRemove={() => removeCategory(i)}
+            />
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {cat.items.map((item, j) => (
@@ -226,11 +432,21 @@ function ContactVariantsEditor({
   const addVariant = () =>
     onChange([
       ...contact,
-      { key: "", name: "", email: "", phone: "", link: null, linkDisplay: "", location: "", title: "" },
+      { key: "", name: "", email: "", phone: "", links: [], location: "", title: "" },
     ]);
   const updateVariant = (i: number, patch: Partial<ContactVariant>) =>
     onChange(updateAt(contact, i, { ...contact[i], ...patch }));
   const removeVariant = (i: number) => onChange(removeAt(contact, i));
+  const moveVariant = (from: number, to: number) => onChange(move(contact, from, to));
+
+  const links = (i: number): ContactLink[] => contact[i].links ?? [];
+  const addLink = (i: number) => updateVariant(i, { links: [...links(i), { url: "", label: "" }] });
+  const updateLink = (i: number, li: number, patch: Partial<ContactLink>) =>
+    updateVariant(i, { links: updateAt(links(i), li, { ...links(i)[li], ...patch }) });
+  const removeLink = (i: number, li: number) =>
+    updateVariant(i, { links: removeAt(links(i), li) });
+  const moveLink = (i: number, from: number, to: number) =>
+    updateVariant(i, { links: move(links(i), from, to) });
 
   return (
     <div className="space-y-4">
@@ -274,21 +490,63 @@ function ContactVariantsEditor({
                 value={c.location}
                 onChange={(e) => updateVariant(i, { location: e.target.value })}
               />
-              <input
-                className="input"
-                placeholder="Link (optional, e.g. https://github.com/you)"
-                value={c.link ?? ""}
-                onChange={(e) => updateVariant(i, { link: e.target.value || null })}
-              />
-              <input
-                className="input"
-                placeholder="Link display text (e.g. github.com/you)"
-                value={c.linkDisplay}
-                onChange={(e) => updateVariant(i, { linkDisplay: e.target.value })}
-              />
             </div>
-            <button onClick={() => removeVariant(i)} className="icon-btn">
-              <Trash2 className="size-3.5" />
+            <EntryControls
+              index={i}
+              count={contact.length}
+              onMove={moveVariant}
+              onRemove={() => removeVariant(i)}
+            />
+          </div>
+
+          <div className="mt-3 space-y-1.5">
+            <Mono dim>Links</Mono>
+            {(c.links ?? []).map((lnk, li) => (
+              <div key={li} className="flex items-center gap-1.5">
+                <input
+                  className="input flex-1"
+                  placeholder="URL (e.g. https://github.com/you)"
+                  value={lnk.url}
+                  onChange={(e) => updateLink(i, li, { url: e.target.value })}
+                />
+                <input
+                  className="input flex-1"
+                  placeholder="Display text (e.g. github.com/you)"
+                  value={lnk.label}
+                  onChange={(e) => updateLink(i, li, { label: e.target.value })}
+                />
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    disabled={li === 0}
+                    onClick={() => moveLink(i, li, li - 1)}
+                    aria-label="Move link up"
+                  >
+                    <ChevronUp className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    disabled={li === (c.links ?? []).length - 1}
+                    onClick={() => moveLink(i, li, li + 1)}
+                    aria-label="Move link down"
+                  >
+                    <ChevronDown className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => removeLink(i, li)}
+                    aria-label="Remove link"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button type="button" onClick={() => addLink(i)} className="add-btn">
+              <Plus className="size-3" /> Add link
             </button>
           </div>
         </div>
@@ -311,6 +569,7 @@ function SummaryVariantsEditor({
   const updateVariant = (i: number, patch: Partial<SummaryVariant>) =>
     onChange(updateAt(summary, i, { ...summary[i], ...patch }));
   const removeVariant = (i: number) => onChange(removeAt(summary, i));
+  const moveVariant = (from: number, to: number) => onChange(move(summary, from, to));
 
   return (
     <div className="space-y-4">
@@ -340,9 +599,12 @@ function SummaryVariantsEditor({
                 onChange={(e) => updateVariant(i, { text: e.target.value })}
               />
             </div>
-            <button onClick={() => removeVariant(i)} className="icon-btn">
-              <Trash2 className="size-3.5" />
-            </button>
+            <EntryControls
+              index={i}
+              count={summary.length}
+              onMove={moveVariant}
+              onRemove={() => removeVariant(i)}
+            />
           </div>
         </div>
       ))}
@@ -364,6 +626,7 @@ function ExperienceEditor({
   const updateEntry = (i: number, patch: Partial<ExperienceEntry>) =>
     onChange(updateAt(experience, i, { ...experience[i], ...patch }));
   const removeEntry = (i: number) => onChange(removeAt(experience, i));
+  const moveEntry = (from: number, to: number) => onChange(move(experience, from, to));
   const addBullet = (i: number) => updateEntry(i, { bullets: [...experience[i].bullets, ""] });
   const updateBullet = (i: number, j: number, value: string) =>
     updateEntry(i, { bullets: updateAt(experience[i].bullets, j, value) });
@@ -371,67 +634,68 @@ function ExperienceEditor({
     updateEntry(i, { bullets: experience[i].bullets.filter((_, idx) => idx !== j) });
 
   return (
-    <Section title="Experience">
-      <div className="space-y-4">
-        {experience.map((entry, i) => (
-          <div key={i} className="rounded-md border border-border bg-background p-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="grid flex-1 grid-cols-2 gap-2">
-                <input
-                  className="input"
-                  placeholder="Role"
-                  value={entry.role}
-                  onChange={(e) => updateEntry(i, { role: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Organization"
-                  value={entry.org}
-                  onChange={(e) => updateEntry(i, { org: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Location"
-                  value={entry.location}
-                  onChange={(e) => updateEntry(i, { location: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Dates (e.g. 2023 – Present)"
-                  value={entry.date}
-                  onChange={(e) => updateEntry(i, { date: e.target.value })}
-                />
-              </div>
-              <button onClick={() => removeEntry(i)} className="icon-btn">
-                <Trash2 className="size-3.5" />
-              </button>
+    <div className="space-y-4">
+      {experience.map((entry, i) => (
+        <div key={i} className="rounded-md border border-border bg-background p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="grid flex-1 grid-cols-2 gap-2">
+              <input
+                className="input"
+                placeholder="Role"
+                value={entry.role}
+                onChange={(e) => updateEntry(i, { role: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Organization"
+                value={entry.org}
+                onChange={(e) => updateEntry(i, { org: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Location"
+                value={entry.location}
+                onChange={(e) => updateEntry(i, { location: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Dates (e.g. 2023 – Present)"
+                value={entry.date}
+                onChange={(e) => updateEntry(i, { date: e.target.value })}
+              />
             </div>
-
-            <div className="mt-2 space-y-1.5">
-              {entry.bullets.map((b, j) => (
-                <div key={j} className="flex items-center gap-1.5">
-                  <input
-                    className="input flex-1"
-                    placeholder="Bullet"
-                    value={b}
-                    onChange={(e) => updateBullet(i, j, e.target.value)}
-                  />
-                  <button onClick={() => removeBullet(i, j)} className="icon-btn">
-                    <X className="size-3.5" />
-                  </button>
-                </div>
-              ))}
-              <button onClick={() => addBullet(i)} className="add-btn">
-                <Plus className="size-3" /> Add bullet
-              </button>
-            </div>
+            <EntryControls
+              index={i}
+              count={experience.length}
+              onMove={moveEntry}
+              onRemove={() => removeEntry(i)}
+            />
           </div>
-        ))}
-        <button onClick={addEntry} className="add-btn">
-          <Plus className="size-3.5" /> Add role
-        </button>
-      </div>
-    </Section>
+
+          <div className="mt-2 space-y-1.5">
+            {entry.bullets.map((b, j) => (
+              <div key={j} className="flex items-center gap-1.5">
+                <input
+                  className="input flex-1"
+                  placeholder="Bullet"
+                  value={b}
+                  onChange={(e) => updateBullet(i, j, e.target.value)}
+                />
+                <button onClick={() => removeBullet(i, j)} className="icon-btn">
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ))}
+            <button onClick={() => addBullet(i)} className="add-btn">
+              <Plus className="size-3" /> Add bullet
+            </button>
+          </div>
+        </div>
+      ))}
+      <button onClick={addEntry} className="add-btn">
+        <Plus className="size-3.5" /> Add role
+      </button>
+    </div>
   );
 }
 
@@ -446,67 +710,67 @@ function ResearchEditor({
   const updateEntry = (i: number, patch: Partial<ResearchEntry>) =>
     onChange(updateAt(research, i, { ...research[i], ...patch }));
   const removeEntry = (i: number) => onChange(removeAt(research, i));
+  const moveEntry = (from: number, to: number) => onChange(move(research, from, to));
 
   return (
-    <Section title="Research & Publications">
-      <div className="space-y-4">
-        {research.map((entry, i) => (
-          <div key={i} className="rounded-md border border-border bg-background p-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="grid flex-1 grid-cols-2 gap-2">
-                <input
-                  className="input"
-                  placeholder="Title (e.g. talk / paper title)"
-                  value={entry.title}
-                  onChange={(e) => updateEntry(i, { title: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Role (e.g. Speaker)"
-                  value={entry.role}
-                  onChange={(e) => updateEntry(i, { role: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Organization / venue"
-                  value={entry.org}
-                  onChange={(e) => updateEntry(i, { org: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Location"
-                  value={entry.location}
-                  onChange={(e) => updateEntry(i, { location: e.target.value })}
-                />
-              </div>
-              <button onClick={() => removeEntry(i)} className="icon-btn">
-                <Trash2 className="size-3.5" />
-              </button>
+    <div className="space-y-4">
+      {research.map((entry, i) => (
+        <div key={i} className="rounded-md border border-border bg-background p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="grid flex-1 grid-cols-2 gap-2">
+              <input
+                className="input"
+                placeholder="Title (e.g. talk / paper title)"
+                value={entry.title}
+                onChange={(e) => updateEntry(i, { title: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Role (e.g. Speaker)"
+                value={entry.role}
+                onChange={(e) => updateEntry(i, { role: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Organization / venue"
+                value={entry.org}
+                onChange={(e) => updateEntry(i, { org: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Location"
+                value={entry.location}
+                onChange={(e) => updateEntry(i, { location: e.target.value })}
+              />
             </div>
-            <textarea
-              className="input mt-2 w-full"
-              rows={2}
-              placeholder="Description"
-              value={entry.description}
-              onChange={(e) => updateEntry(i, { description: e.target.value })}
+            <EntryControls
+              index={i}
+              count={research.length}
+              onMove={moveEntry}
+              onRemove={() => removeEntry(i)}
             />
           </div>
-        ))}
-        <button onClick={addEntry} className="add-btn">
-          <Plus className="size-3.5" /> Add publication
-        </button>
-      </div>
-    </Section>
+          <textarea
+            className="input mt-2 w-full"
+            rows={2}
+            placeholder="Description"
+            value={entry.description}
+            onChange={(e) => updateEntry(i, { description: e.target.value })}
+          />
+        </div>
+      ))}
+      <button onClick={addEntry} className="add-btn">
+        <Plus className="size-3.5" /> Add entry
+      </button>
+    </div>
   );
 }
 
 function NameDescriptionEditor({
-  title,
   entryLabel,
   entries,
   onChange,
 }: {
-  title: string;
   entryLabel: string;
   entries: (ProjectEntry | InvolvementEntry)[];
   onChange: (entries: (ProjectEntry | InvolvementEntry)[]) => void;
@@ -515,37 +779,39 @@ function NameDescriptionEditor({
   const updateEntry = (i: number, patch: Partial<ProjectEntry>) =>
     onChange(updateAt(entries, i, { ...entries[i], ...patch }));
   const removeEntry = (i: number) => onChange(removeAt(entries, i));
+  const moveEntry = (from: number, to: number) => onChange(move(entries, from, to));
 
   return (
-    <Section title={title}>
-      <div className="space-y-3">
-        {entries.map((entry, i) => (
-          <div key={i} className="rounded-md border border-border bg-background p-3">
-            <div className="flex items-start justify-between gap-2">
-              <input
-                className="input flex-1"
-                placeholder="Name"
-                value={entry.name}
-                onChange={(e) => updateEntry(i, { name: e.target.value })}
-              />
-              <button onClick={() => removeEntry(i)} className="icon-btn">
-                <Trash2 className="size-3.5" />
-              </button>
-            </div>
-            <textarea
-              className="input mt-2 w-full"
-              rows={2}
-              placeholder="Description"
-              value={entry.description}
-              onChange={(e) => updateEntry(i, { description: e.target.value })}
+    <div className="space-y-3">
+      {entries.map((entry, i) => (
+        <div key={i} className="rounded-md border border-border bg-background p-3">
+          <div className="flex items-start justify-between gap-2">
+            <input
+              className="input flex-1"
+              placeholder="Name"
+              value={entry.name}
+              onChange={(e) => updateEntry(i, { name: e.target.value })}
+            />
+            <EntryControls
+              index={i}
+              count={entries.length}
+              onMove={moveEntry}
+              onRemove={() => removeEntry(i)}
             />
           </div>
-        ))}
-        <button onClick={addEntry} className="add-btn">
-          <Plus className="size-3.5" /> Add {entryLabel}
-        </button>
-      </div>
-    </Section>
+          <textarea
+            className="input mt-2 w-full"
+            rows={2}
+            placeholder="Description"
+            value={entry.description}
+            onChange={(e) => updateEntry(i, { description: e.target.value })}
+          />
+        </div>
+      ))}
+      <button onClick={addEntry} className="add-btn">
+        <Plus className="size-3.5" /> Add {entryLabel}
+      </button>
+    </div>
   );
 }
 
@@ -561,67 +827,69 @@ function EducationEditor({
   const updateEntry = (i: number, patch: Partial<EducationEntry>) =>
     onChange(updateAt(education, i, { ...education[i], ...patch }));
   const removeEntry = (i: number) => onChange(removeAt(education, i));
+  const moveEntry = (from: number, to: number) => onChange(move(education, from, to));
 
   return (
-    <Section title="Education">
-      <div className="space-y-4">
-        {education.map((entry, i) => (
-          <div key={i} className="rounded-md border border-border bg-background p-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="grid flex-1 grid-cols-2 gap-2">
-                <input
-                  className="input"
-                  placeholder="School"
-                  value={entry.school}
-                  onChange={(e) => updateEntry(i, { school: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Location"
-                  value={entry.location}
-                  onChange={(e) => updateEntry(i, { location: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Degree"
-                  value={entry.degree}
-                  onChange={(e) => updateEntry(i, { degree: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Dates (e.g. 2024 – 2026)"
-                  value={entry.date}
-                  onChange={(e) => updateEntry(i, { date: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="GPA (optional)"
-                  value={entry.gpa}
-                  onChange={(e) => updateEntry(i, { gpa: e.target.value })}
-                />
-                <input
-                  className="input"
-                  placeholder="Honors (optional)"
-                  value={entry.honors}
-                  onChange={(e) => updateEntry(i, { honors: e.target.value })}
-                />
-                <input
-                  className="input col-span-2"
-                  placeholder="Coursework (optional)"
-                  value={entry.coursework}
-                  onChange={(e) => updateEntry(i, { coursework: e.target.value })}
-                />
-              </div>
-              <button onClick={() => removeEntry(i)} className="icon-btn">
-                <Trash2 className="size-3.5" />
-              </button>
+    <div className="space-y-4">
+      {education.map((entry, i) => (
+        <div key={i} className="rounded-md border border-border bg-background p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="grid flex-1 grid-cols-2 gap-2">
+              <input
+                className="input"
+                placeholder="School"
+                value={entry.school}
+                onChange={(e) => updateEntry(i, { school: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Location"
+                value={entry.location}
+                onChange={(e) => updateEntry(i, { location: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Degree"
+                value={entry.degree}
+                onChange={(e) => updateEntry(i, { degree: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Dates (e.g. 2024 – 2026)"
+                value={entry.date}
+                onChange={(e) => updateEntry(i, { date: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="GPA (optional)"
+                value={entry.gpa}
+                onChange={(e) => updateEntry(i, { gpa: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Honors (optional)"
+                value={entry.honors}
+                onChange={(e) => updateEntry(i, { honors: e.target.value })}
+              />
+              <input
+                className="input col-span-2"
+                placeholder="Coursework (optional)"
+                value={entry.coursework}
+                onChange={(e) => updateEntry(i, { coursework: e.target.value })}
+              />
             </div>
+            <EntryControls
+              index={i}
+              count={education.length}
+              onMove={moveEntry}
+              onRemove={() => removeEntry(i)}
+            />
           </div>
-        ))}
-        <button onClick={addEntry} className="add-btn">
-          <Plus className="size-3.5" /> Add education
-        </button>
-      </div>
-    </Section>
+        </div>
+      ))}
+      <button onClick={addEntry} className="add-btn">
+        <Plus className="size-3.5" /> Add education
+      </button>
+    </div>
   );
 }

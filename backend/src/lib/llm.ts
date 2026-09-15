@@ -1,6 +1,4 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
-import { selectionDescriptorSchema, SelectionDescriptor } from "./selectionDescriptor";
 import { ResumeProfileData } from "./resumeSchemas";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -8,87 +6,130 @@ const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5";
 
 export class LlmGenerationError extends Error {}
 
-const SYSTEM_PROMPT = `You are a resume tailoring assistant. You will be given a user's full resume content as JSON (the "profile") and a job description.
+const SYSTEM_PROMPT = `You are a resume tailoring assistant. You are given three things:
+1. A user's full resume content as JSON (the "profile").
+2. A job description.
+3. A LaTeX resume template — a complete, compilable .tex document with placeholder content.
 
-Your job is to select what to include in a tailored resume by returning ONLY indices into the profile's arrays — never copy, paraphrase, or invent factual content. The only field you may write freely is "summary".
+Your job: produce a COMPLETE LaTeX document that looks exactly like the template but contains the user's real content, selected and ordered for this specific job.
 
-CRITICAL: every non-summary value in your output must be an index, an array of indices, or the literal "all" — never a literal string, number, or object copied from the data. If you find yourself typing a string that exists in the profile (a company name, a bullet, a skill), you are doing it wrong — reference it by its position in the array instead.
+TEMPLATE FIDELITY
+- Keep the template's \\documentclass, every \\usepackage, the whole preamble, and every custom \\newcommand / \\renewcommand EXACTLY as given. Do not add or remove packages or macros.
+- Build each entry with the same custom commands the template uses (e.g. \\resumeSubheading, \\resumeProjectHeading, \\resumeItem, the itemize wrappers). Match its structure for the header, section headings, and spacing.
+- The output must compile with pdflatex with no changes.
 
-Selection rules:
-- skills: select only categories and items relevant to the job. Drop everything else.
-- experience: select only the most relevant roles. Max 4-5 entries. Trim bullets to the 2-3 most relevant per role.
-- projects: pick the 2-3 most relevant.
-- research: include only if the job is related to security, policy, or research.
-- involvement: include only if relevant.
-- education: usually include all of it ("all"), unless clearly irrelevant.
-- contactKey: pick whichever contact variant's title/framing best matches the job.
-- summary: write a fresh 1-3 sentence summary tailored to the job description. This is the only field where you may write new text about the candidate.
-- jobTitle: a short 2-5 word label for the role being applied to (e.g. "Security Engineer" or "Backend Engineer, Stripe"), extracted or inferred from the job description. This is metadata describing the JOB, not the candidate, and is used only to name this resume version — keep it short and consistent, no punctuation beyond a comma.`;
+CONTENT RULES — never invent facts
+- Every company, role, title, date, school, degree, project name, and bullet fact must come from the profile. Do not invent, embellish, or change numbers.
+- You may omit, reorder, and lightly condense. You may NOT add.
+- The ONLY prose you may write freely is the summary/objective: a fresh 1-3 sentence summary tailored to the job description. If the template has no summary area and the profile's section list doesn't include a visible "summary", skip it.
+- Contact details (name, email, phone, location, links) come from the chosen contact variant — pick whichever contact variant's title/framing best fits the job. Render every link in profile.contact.links in the template's header style.
 
-function buildUserPrompt(input: {
-  profile: ResumeProfileData;
-  jobDescription: string;
-  contactVariantHint?: string;
-  targetRole?: string;
-}): string {
-  const parts = [
-    `Here is the profile:\n${JSON.stringify(input.profile, null, 2)}`,
-    `Here is the job description:\n${input.jobDescription}`,
-  ];
-  if (input.targetRole) parts.push(`Target role (for context): ${input.targetRole}`);
-  if (input.contactVariantHint) {
-    parts.push(`Contact variant hint (a suggestion, not a requirement — pick whichever contact key actually fits best): ${input.contactVariantHint}`);
-  }
-  return parts.join("\n\n");
+SELECTION GUIDANCE
+- experience: keep the 3-5 most relevant roles, 2-4 bullets each — the ones that match the job.
+- projects: the 2-3 most relevant.
+- skills: only categories and items relevant to the job.
+- research: include only if the job relates to research/security/policy/academia.
+- involvement / leadership: include only if relevant.
+- education: normally include all of it.
+
+SECTION ORDER, TITLES, VISIBILITY
+- profile.sections is an ordered list of { kind, title, visible }.
+- Emit sections in that order. Skip any with visible === false.
+- Use each section's "title" as the \\section{...} heading text (e.g. title "Leadership" for kind "involvement").
+- Map kind -> profile data: summary -> the tailored summary; education -> profile.education; experience -> profile.experience; projects -> profile.projects; skills -> profile.skills; involvement -> profile.involvement; research -> profile.research.
+- If profile.sections is empty, use a sensible default order: Education, Experience, Projects, Skills, then the rest.
+- The contact block is always the header, regardless of the section list.
+
+LATEX SAFETY
+- Escape LaTeX special characters in all content: & % $ # _ ~ ^ (e.g. "R&D" -> "R\\&D", "20%" -> "20\\%"). Leave URLs inside \\href untouched.
+
+OUTPUT FORMAT
+- Line 1 exactly: ROLE: <a 2-5 word label for the target role, e.g. "Backend Engineer" or "Security Engineer, Stripe" — no quotes, no trailing period>
+- From line 2 on: the complete LaTeX document, starting with \\documentclass and ending with \\end{document}.
+- No markdown code fences. No commentary before or after.`;
+
+function extractText(response: Anthropic.Message): string {
+  const block = response.content.find((b) => b.type === "text");
+  return block && block.type === "text" ? block.text : "";
 }
 
-export async function generateSelectionDescriptor(input: {
+function stripFences(s: string): string {
+  const t = s.trim();
+  if (t.startsWith("```")) {
+    return t.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```$/, "").trim();
+  }
+  return t;
+}
+
+// Split the "ROLE: <label>" preamble line off the model's output.
+function splitRoleAndLatex(raw: string): { jobTitle: string; latexSource: string } {
+  const text = stripFences(raw);
+  const match = text.match(/^\s*ROLE:\s*(.+?)\s*\r?\n/);
+  if (match) {
+    return { jobTitle: match[1].trim(), latexSource: text.slice(match[0].length).trim() };
+  }
+  return { jobTitle: "Tailored resume", latexSource: text };
+}
+
+function assertUsableLatex(latex: string): void {
+  if (!latex.includes("\\documentclass") || !latex.includes("\\end{document}")) {
+    throw new LlmGenerationError("The model did not return a complete LaTeX document.");
+  }
+}
+
+export async function generateTailoredResume(input: {
   profile: ResumeProfileData;
   jobDescription: string;
-  contactVariantHint?: string;
+  templateSource: string;
   targetRole?: string;
-}): Promise<SelectionDescriptor> {
-  const response = await client.messages.parse({
+}): Promise<{ latexSource: string; jobTitle: string }> {
+  const userContent = [
+    `PROFILE (JSON):\n${JSON.stringify(input.profile, null, 2)}`,
+    `JOB DESCRIPTION:\n${input.jobDescription}`,
+    input.targetRole ? `TARGET ROLE (context): ${input.targetRole}` : null,
+    `LATEX TEMPLATE:\n${input.templateSource}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const response = await client.messages.create({
     model: MODEL,
-    max_tokens: 4096,
-    output_config: { format: zodOutputFormat(selectionDescriptorSchema) },
+    max_tokens: 8000,
     system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: buildUserPrompt(input) }],
+    messages: [{ role: "user", content: userContent }],
   });
 
   if (response.stop_reason === "refusal") {
-    throw new LlmGenerationError("Model declined to generate a selection for this job description.");
+    throw new LlmGenerationError("The model declined to generate a resume for this job description.");
   }
-  if (!response.parsed_output) {
-    throw new LlmGenerationError("Model did not return a valid selection.");
-  }
-
-  const descriptor = response.parsed_output;
-
-  // Semantic retry (distinct from JSON-parse failure, which structured
-  // outputs already rules out): a well-formed descriptor whose contactKey
-  // doesn't match any stored variant. One retry naming the valid keys, then
-  // let resolveSelection's own fallback-with-warning handle it.
-  const validKeys = input.profile.contact.map((c) => c.key);
-  if (validKeys.length > 0 && !validKeys.includes(descriptor.contactKey)) {
-    const retryResponse = await client.messages.parse({
-      model: MODEL,
-      max_tokens: 4096,
-      output_config: { format: zodOutputFormat(selectionDescriptorSchema) },
-      system: SYSTEM_PROMPT,
-      messages: [
-        { role: "user", content: buildUserPrompt(input) },
-        { role: "assistant", content: JSON.stringify(descriptor) },
-        {
-          role: "user",
-          content: `Your contactKey "${descriptor.contactKey}" did not match any of the profile's contact keys. Valid keys are: ${validKeys.join(", ")}. Return the full selection again with a valid contactKey.`,
-        },
-      ],
-    });
-    if (retryResponse.parsed_output) {
-      return retryResponse.parsed_output;
-    }
+  if (response.stop_reason === "max_tokens") {
+    throw new LlmGenerationError("The generated resume was too long to finish. Try a shorter job description or template.");
   }
 
-  return descriptor;
+  const { jobTitle, latexSource } = splitRoleAndLatex(extractText(response));
+  assertUsableLatex(latexSource);
+  return { jobTitle, latexSource };
+}
+
+const REPAIR_SYSTEM_PROMPT = `You are a LaTeX repair tool. You are given a resume .tex document that failed to compile with pdflatex, plus the compiler log. Return a corrected version of the COMPLETE document that compiles cleanly. Change as little as possible — fix only what the log points at. Do not alter the wording of resume content. Output only the LaTeX document, starting with \\documentclass, no code fences, no commentary.`;
+
+export async function repairResumeLatex(input: {
+  latexSource: string;
+  compileLog: string;
+}): Promise<{ latexSource: string }> {
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 8000,
+    system: REPAIR_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: `COMPILER LOG:\n${input.compileLog.slice(0, 6000)}\n\nDOCUMENT:\n${input.latexSource}`,
+      },
+    ],
+  });
+
+  const latexSource = stripFences(extractText(response));
+  assertUsableLatex(latexSource);
+  return { latexSource };
 }

@@ -1,24 +1,23 @@
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Download, Send, ChevronDown, UserCog, Code2, Save } from "lucide-react";
-import { Application } from "@/lib/mock-data";
-import { api, ResumeVersion } from "@/lib/api";
+import { Download, Send, UserCog, Code2, Save, LayoutTemplate, Trash2, Plus } from "lucide-react";
+import { api, ResumeVersion, ResumeTemplate } from "@/lib/api";
 import { Mono } from "@/components/mono";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 type ChatMessage = { role: "user" | "assistant"; content: string; pending?: boolean };
+
+const TEMPLATE_STORAGE_KEY = "pathway.resumeTemplateId";
 
 const WELCOME_MESSAGE: ChatMessage = {
   role: "assistant",
   content:
-    "Paste a job description below and I'll draft a resume tailored to it — pulling only from what's in your Resume Profile (use \"Edit profile\" above if you haven't filled it out yet). Nothing gets invented; I only select and reorder your real experience, skills, and projects to match the role.",
+    "Paste a full job posting in the box below — title, team, responsibilities, requirements, all of it — and I'll draft a resume tailored to it, formatted to match your selected template (pick one under \"Templates\" up top). It pulls only from what's in your Resume Profile; nothing gets invented, only selected and reordered to match the role.",
 };
 
 export function Resume() {
   const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
   const [input, setInput] = useState("");
-  const [tailorOpen, setTailorOpen] = useState(false);
-  const [tailorTo, setTailorTo] = useState<string | null>(null);
-  const [applications, setApplications] = useState<Application[]>([]);
   const [versions, setVersions] = useState<ResumeVersion[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(true);
   const [versionsError, setVersionsError] = useState<string | null>(null);
@@ -32,11 +31,56 @@ export function Resume() {
   const [isSavingLatex, setIsSavingLatex] = useState(false);
   const [latexSaved, setLatexSaved] = useState(false);
 
+  // Templates
+  const [templates, setTemplates] = useState<ResumeTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(true);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [templatesDialogOpen, setTemplatesDialogOpen] = useState(false);
+  const [tplName, setTplName] = useState("");
+  const [tplSource, setTplSource] = useState("");
+  const [savingTpl, setSavingTpl] = useState(false);
+  const [tplError, setTplError] = useState<string | null>(null);
+
   const activeVersionData = versions.find((v) => v.id === activeVersion) ?? null;
+  const selectedTemplate = templates.find((t) => t.id === selectedTemplateId) ?? null;
+
+  // What the right-hand pane renders: the active saved version if there is one,
+  // otherwise the currently selected template as-is.
+  const previewLatex = activeVersionData?.latexSource ?? selectedTemplate?.latexSource ?? null;
+
+  async function loadTemplates() {
+    setTemplatesLoading(true);
+    try {
+      const list = await api.resume.templates.list();
+      setTemplates(list);
+    } catch {
+      // non-fatal; selector just stays empty
+    } finally {
+      setTemplatesLoading(false);
+    }
+  }
 
   useEffect(() => {
-    api.applications.list().then(setApplications).catch(() => {});
+    loadTemplates();
   }, []);
+
+  // Once templates load, settle on a selection: keep the current one if valid,
+  // else the last-used one from storage, else the first template.
+  useEffect(() => {
+    if (templates.length === 0) return;
+    const stored = typeof window !== "undefined" ? localStorage.getItem(TEMPLATE_STORAGE_KEY) : null;
+    setSelectedTemplateId((cur) => {
+      if (cur && templates.some((t) => t.id === cur)) return cur;
+      if (stored && templates.some((t) => t.id === stored)) return stored;
+      return templates[0].id;
+    });
+  }, [templates]);
+
+  useEffect(() => {
+    if (selectedTemplateId && typeof window !== "undefined") {
+      localStorage.setItem(TEMPLATE_STORAGE_KEY, selectedTemplateId);
+    }
+  }, [selectedTemplateId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,7 +117,7 @@ export function Resume() {
     let objectUrl: string | null = null;
 
     async function doRender() {
-      if (!activeVersionData) {
+      if (!previewLatex) {
         setPdfUrl(null);
         return;
       }
@@ -81,7 +125,7 @@ export function Resume() {
       setIsRendering(true);
       setRenderError(null);
       try {
-        const blob = await api.resume.renderPdf(activeVersionData.latexSource);
+        const blob = await api.resume.renderPdf(previewLatex);
         if (cancelled) return;
 
         objectUrl = URL.createObjectURL(blob);
@@ -101,7 +145,7 @@ export function Resume() {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [activeVersionData]);
+  }, [previewLatex]);
 
   const replaceLastMessage = (content: string) => {
     setMessages((prev) => {
@@ -115,6 +159,14 @@ export function Resume() {
     e.preventDefault();
     if (!input.trim() || isGenerating) return;
 
+    if (!selectedTemplateId) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "Pick a template first — use the Template selector at the top right." },
+      ]);
+      return;
+    }
+
     const jobDescription = input;
     setInput("");
     setIsGenerating(true);
@@ -123,7 +175,9 @@ export function Resume() {
       { role: "user", content: jobDescription },
       {
         role: "assistant",
-        content: "Reading your profile and this job description, then selecting the experience, skills, and projects that match — this takes a few seconds…",
+        content: `Reading your profile and this job posting, then writing a resume in the ${
+          selectedTemplate?.name ?? "selected"
+        } template's style — this takes a few seconds…`,
         pending: true,
       },
     ]);
@@ -131,14 +185,12 @@ export function Resume() {
     try {
       const { warnings, ...version } = await api.resume.generate({
         jobDescription,
-        targetRole: tailorTo ?? undefined,
+        templateId: selectedTemplateId,
       });
       setVersions((prev) => [...prev, version]);
       setActiveVersion(version.id);
       const warningNote =
-        warnings.length > 0
-          ? ` Heads up — ${warnings.length} selection${warnings.length > 1 ? "s" : ""} needed adjusting: ${warnings.join("; ")}.`
-          : "";
+        warnings.length > 0 ? ` Heads up — ${warnings.join("; ")}` : "";
       replaceLastMessage(
         `Done — drafted ${version.label}. Check the preview on the right; download it once it looks good, or click "Edit LaTeX" to fine-tune anything by hand.${warningNote}`,
       );
@@ -186,47 +238,70 @@ export function Resume() {
     }
   };
 
+  const handleSaveTemplate = async () => {
+    setSavingTpl(true);
+    setTplError(null);
+    try {
+      const created = await api.resume.templates.create({ name: tplName.trim(), latexSource: tplSource });
+      await loadTemplates();
+      setSelectedTemplateId(created.id);
+      setTplName("");
+      setTplSource("");
+    } catch (err) {
+      setTplError(err instanceof Error ? err.message : "Failed to save template");
+    } finally {
+      setSavingTpl(false);
+    }
+  };
+
+  const handleDeleteTemplate = async (id: string) => {
+    setTplError(null);
+    try {
+      await api.resume.templates.remove(id);
+      setTemplates((prev) => prev.filter((t) => t.id !== id));
+      setSelectedTemplateId((cur) => (cur === id ? "" : cur));
+    } catch (err) {
+      setTplError(err instanceof Error ? err.message : "Failed to delete template");
+    }
+  };
+
   return (
     <div className="flex h-screen flex-col">
       <header className="flex h-14 items-center justify-between border-b border-border px-5">
         <h1 className="text-base font-semibold tracking-tight">Resume Workshop</h1>
         <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs">
+            <span className="text-text-secondary">Template</span>
+            <select
+              value={selectedTemplateId}
+              onChange={(e) => setSelectedTemplateId(e.target.value)}
+              disabled={templatesLoading || templates.length === 0}
+              className="max-w-[10rem] bg-transparent text-xs outline-none disabled:opacity-50"
+            >
+              {templates.length === 0 && (
+                <option value="">{templatesLoading ? "Loading…" : "None"}</option>
+              )}
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                  {t.builtin ? "" : " (custom)"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => setTemplatesDialogOpen(true)}
+            className="flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-1.5 text-xs hover:border-border-strong"
+          >
+            <LayoutTemplate className="size-3.5 text-text-tertiary" /> Templates
+          </button>
           <Link
             to="/app/resume/profile"
             className="flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-1.5 text-xs hover:border-border-strong"
           >
             <UserCog className="size-3.5 text-text-tertiary" /> Edit profile
           </Link>
-          <div className="relative">
-          <button
-            onClick={() => setTailorOpen(!tailorOpen)}
-            className="flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-1.5 text-xs"
-          >
-            <span className="text-text-secondary">Tailor to:</span>
-            <span>{tailorTo ?? "Select application"}</span>
-            <ChevronDown className="size-3.5 text-text-tertiary" />
-          </button>
-          {tailorOpen && (
-            <div className="absolute right-0 top-full z-10 mt-1 w-72 overflow-hidden rounded-md border border-border bg-surface">
-              {applications.length === 0 && (
-                <div className="px-3 py-2 text-xs text-text-tertiary">No applications yet</div>
-              )}
-              {applications.slice(0, 6).map((a) => (
-                <button
-                  key={a.id}
-                  onClick={() => {
-                    setTailorTo(`${a.company} — ${a.position}`);
-                    setTailorOpen(false);
-                  }}
-                  className="block w-full px-3 py-2 text-left text-xs hover:bg-background"
-                >
-                  <div className="font-medium">{a.company}</div>
-                  <div className="text-text-tertiary">{a.position}</div>
-                </button>
-              ))}
-            </div>
-          )}
-          </div>
         </div>
       </header>
 
@@ -242,7 +317,9 @@ export function Resume() {
                 ) : (
                   <div>
                     <Mono dim>Copilot</Mono>
-                    <div className={`mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed ${m.pending ? "animate-pulse text-text-tertiary" : "text-text-primary"}`}>
+                    <div
+                      className={`mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed ${m.pending ? "animate-pulse text-text-tertiary" : "text-text-primary"}`}
+                    >
                       {m.content}
                     </div>
                   </div>
@@ -250,40 +327,61 @@ export function Resume() {
               </div>
             ))}
           </div>
-          <form onSubmit={send} className="border-t border-border p-3">
-            <div className="flex items-end gap-2 rounded-md border border-border bg-surface p-2">
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Paste the job description…"
-                rows={2}
-                disabled={isGenerating}
-                className="flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-text-tertiary disabled:opacity-60"
-              />
-              <button
-                type="submit"
-                disabled={isGenerating || !input.trim()}
-                className="rounded-md bg-primary p-1.5 text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
-              >
-                <Send className="size-3.5" />
-              </button>
+          <form onSubmit={send} className="space-y-2 border-t border-border p-3">
+            <div className="flex items-baseline justify-between">
+              <Mono dim>Job description</Mono>
+              <span className="text-[11px] text-text-tertiary">
+                Formatting to match: {selectedTemplate?.name ?? "—"}
+              </span>
             </div>
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Paste the full job posting here — title, team, responsibilities, requirements, everything…"
+              rows={7}
+              disabled={isGenerating}
+              className="w-full resize-none rounded-md border border-border bg-surface p-2.5 text-sm outline-none placeholder:text-text-tertiary focus:border-border-strong disabled:opacity-60"
+            />
+            <button
+              type="submit"
+              disabled={isGenerating || !input.trim() || !selectedTemplateId}
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-primary py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+            >
+              <Send className="size-3.5" />
+              {isGenerating ? "Drafting…" : "Generate tailored resume"}
+            </button>
           </form>
         </div>
 
         <div className="flex min-h-0 flex-col overflow-hidden">
           <div className="flex items-center justify-between border-b border-border px-5 py-3">
             <div className="flex items-center gap-2 overflow-auto">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveVersion(null);
+                  setEditorOpen(false);
+                }}
+                className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs ${!activeVersion ? "border-primary bg-primary/10" : "border-border hover:border-border-strong"}`}
+              >
+                <Plus className="size-3.5" /> New
+              </button>
               {versions.map((v, i) => (
                 <button
                   key={v.id}
                   onClick={() => setActiveVersion(v.id)}
-                  className={`flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs ${activeVersion === v.id ? "border-primary bg-primary/10" : "border-border hover:border-border-strong"}`}
+                  className={`flex shrink-0 items-center gap-2 rounded-md border px-2.5 py-1 text-xs ${activeVersion === v.id ? "border-primary bg-primary/10" : "border-border hover:border-border-strong"}`}
                 >
                   <Mono>v{i + 1}</Mono>
                   <span className="text-text-secondary">{v.label.split("—")[1]?.trim() ?? v.label}</span>
                 </button>
               ))}
+              {!activeVersion && (
+                <span className="shrink-0 text-xs text-text-tertiary">
+                  New resume · previewing{" "}
+                  <span className="text-text-secondary">{selectedTemplate?.name ?? "no template"}</span>
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -295,7 +393,7 @@ export function Resume() {
               </button>
               <button
                 onClick={handleDownload}
-                disabled={!pdfUrl}
+                disabled={!pdfUrl || !activeVersion}
                 className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-1.5 text-xs hover:border-border-strong disabled:opacity-40"
               >
                 <Download className="size-3.5" /> Download PDF
@@ -332,29 +430,23 @@ export function Resume() {
             )}
 
             <div className="min-h-0 flex-1 overflow-auto bg-background/40 p-8">
-              {versionsLoading && (
-                <div className="flex h-full items-center justify-center text-sm text-text-tertiary">
-                  Loading resume versions…
-                </div>
-              )}
-              {!versionsLoading && versionsError && (
-                <div className="flex h-full items-center justify-center text-sm text-red-500">
-                  {versionsError}
-                </div>
-              )}
-              {!versionsLoading && !versionsError && versions.length === 0 && (
-                <div className="flex h-full items-center justify-center text-center text-sm text-text-tertiary">
-                  No resume versions yet. Paste a job description in the chat to draft your first one.
-                </div>
-              )}
-              {!versionsLoading && !versionsError && versions.length > 0 && isRendering && (
+              {isRendering && (
                 <div className="flex h-full items-center justify-center text-sm text-text-tertiary">
                   Rendering…
                 </div>
               )}
-              {!versionsLoading && renderError && (
-                <div className="flex h-full items-center justify-center text-sm text-red-500">
+              {!isRendering && renderError && (
+                <div className="flex h-full items-center justify-center whitespace-pre-wrap px-6 text-center text-sm text-red-500">
                   {renderError}
+                </div>
+              )}
+              {!isRendering && !renderError && !pdfUrl && (
+                <div className="flex h-full items-center justify-center text-center text-sm text-text-tertiary">
+                  {versionsLoading || templatesLoading
+                    ? "Loading…"
+                    : versionsError
+                      ? versionsError
+                      : "Select a template to preview it, or paste a job posting to draft your first tailored version."}
                 </div>
               )}
               {!isRendering && !renderError && pdfUrl && (
@@ -368,6 +460,85 @@ export function Resume() {
           </div>
         </div>
       </div>
+
+      <Dialog open={templatesDialogOpen} onOpenChange={setTemplatesDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Resume templates</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-xs text-text-secondary">
+              Every generated resume is written to match the selected template's layout and macros.
+              Import your own by pasting its full LaTeX source.
+            </p>
+
+            <div className="space-y-1.5">
+              {templates.map((t) => (
+                <div
+                  key={t.id}
+                  className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${t.id === selectedTemplateId ? "border-primary bg-primary/10" : "border-border"}`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedTemplateId(t.id);
+                      setTemplatesDialogOpen(false);
+                    }}
+                    className="flex flex-1 items-center gap-2 text-left"
+                  >
+                    <span className="font-medium">{t.name}</span>
+                    <span className="text-[10px] uppercase tracking-wider text-text-tertiary">
+                      {t.builtin ? "Built-in" : "Custom"}
+                    </span>
+                  </button>
+                  {!t.builtin && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteTemplate(t.id)}
+                      className="text-text-tertiary hover:text-foreground"
+                      aria-label={`Delete ${t.name}`}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+              {templates.length === 0 && (
+                <p className="text-xs text-text-tertiary">
+                  {templatesLoading ? "Loading templates…" : "No templates available."}
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2 border-t border-border pt-4">
+              <Mono dim>Import a template</Mono>
+              <input
+                value={tplName}
+                onChange={(e) => setTplName(e.target.value)}
+                placeholder="Template name (e.g. My CV)"
+                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-border-strong"
+              />
+              <textarea
+                value={tplSource}
+                onChange={(e) => setTplSource(e.target.value)}
+                spellCheck={false}
+                placeholder="Paste the full .tex source — \documentclass … \begin{document} … \end{document}"
+                rows={8}
+                className="w-full resize-none rounded-md border border-border bg-background p-2.5 font-mono text-xs outline-none focus:border-border-strong"
+              />
+              {tplError && <p className="text-xs text-destructive">{tplError}</p>}
+              <button
+                type="button"
+                onClick={handleSaveTemplate}
+                disabled={savingTpl || !tplName.trim() || !tplSource.trim()}
+                className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+              >
+                {savingTpl ? "Saving…" : "Save template"}
+              </button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

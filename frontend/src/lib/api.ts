@@ -36,7 +36,21 @@ export interface ResumeVersion {
   targetRole: string | null;
   jobDescription: string | null;
   selectionDescriptor: unknown;
+  templateId?: string | null;
+  templateName?: string | null;
   createdAt: string;
+}
+
+export interface ResumeTemplate {
+  id: string;
+  name: string;
+  latexSource: string;
+  builtin: boolean;
+}
+
+export interface ContactLink {
+  url: string;
+  label: string;
 }
 
 export interface ContactVariant {
@@ -44,8 +58,7 @@ export interface ContactVariant {
   name: string;
   email: string;
   phone: string;
-  link: string | null;
-  linkDisplay: string;
+  links: ContactLink[];
   location: string;
   title: string;
 }
@@ -97,6 +110,22 @@ export interface EducationEntry {
   coursework: string;
 }
 
+export type SectionKind =
+  | "summary"
+  | "education"
+  | "experience"
+  | "projects"
+  | "skills"
+  | "involvement"
+  | "research";
+
+export interface SectionMeta {
+  kind: SectionKind;
+  /** Heading text shown on the generated resume. */
+  title: string;
+  visible: boolean;
+}
+
 export interface ResumeProfile {
   id: string | null;
   contact: ContactVariant[];
@@ -107,6 +136,7 @@ export interface ResumeProfile {
   projects: ProjectEntry[];
   involvement: InvolvementEntry[];
   education: EducationEntry[];
+  sections: SectionMeta[];
   updatedAt: string | null;
 }
 
@@ -189,7 +219,20 @@ export const api = {
     remove: (id: string) =>
       request<{ ok: boolean }>(`/api/resume/${id}`, { method: "DELETE" }),
 
-    generate: (body: { jobDescription: string; targetRole?: string; contactVariantHint?: string; label?: string }) =>
+    templates: {
+      list: () => request<ResumeTemplate[]>("/api/resume/templates"),
+
+      create: (body: { name: string; latexSource: string }) =>
+        request<ResumeTemplate>("/api/resume/templates", { method: "POST", body: JSON.stringify(body) }),
+
+      update: (id: string, body: Partial<{ name: string; latexSource: string }>) =>
+        request<ResumeTemplate>(`/api/resume/templates/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+
+      remove: (id: string) =>
+        request<{ ok: boolean }>(`/api/resume/templates/${id}`, { method: "DELETE" }),
+    },
+
+    generate: (body: { jobDescription: string; templateId: string; targetRole?: string; label?: string }) =>
       request<ResumeVersion & { warnings: string[] }>("/api/resume/generate", { method: "POST", body: JSON.stringify(body) }),
 
     renderPdf: async (latex: string): Promise<Blob> => {

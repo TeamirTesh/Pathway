@@ -22,6 +22,7 @@ model User {
 
   applications         Application[]
   resumeVersions       ResumeVersion[]
+  resumeTemplates      ResumeTemplate[]
   resumeProfile        ResumeProfile?
 }
 
@@ -70,9 +71,27 @@ model ResumeVersion {
   targetRole          String?
   jobDescription      String?
   selectionDescriptor Json?
+  // Which template produced this version. `templateId` may reference a
+  // ResumeTemplate row or a built-in id like "builtin:jake"; `templateName`
+  // is denormalized so the label survives template deletion.
+  templateId          String?
+  templateName        String?
   createdAt           DateTime @default(now())
 
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model ResumeTemplate {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  latexSource String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
@@ -88,6 +107,10 @@ model ResumeProfile {
   projects    Json     @default("[]")
   involvement Json     @default("[]")
   education   Json     @default("[]")
+  // Ordered list of { kind, title, visible } — controls section order,
+  // heading text, and visibility on the generated resume. Empty means
+  // "use the client's default ordering".
+  sections    Json     @default("[]")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
