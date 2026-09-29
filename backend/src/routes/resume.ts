@@ -3,7 +3,13 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth, AuthRequest } from "../middleware/requireAuth";
 import { profileSchema, PROFILE_CONTENT_KEYS } from "../lib/resumeSchemas";
-import { generateTailoredResume, repairResumeLatex, LlmGenerationError } from "../lib/llm";
+import {
+  generateTailoredResume,
+  repairResumeLatex,
+  trimResumeToOnePage,
+  importResumeText,
+  LlmGenerationError,
+} from "../lib/llm";
 import {
   BUILTIN_TEMPLATES,
   getBuiltinTemplate,
@@ -69,12 +75,36 @@ async function compileLatex(latex: string): Promise<CompileResult> {
   return { ok: true, pdf: Buffer.from(await compileRes.arrayBuffer()) };
 }
 
+// Best-effort page count, read straight from the compiled PDF's page-tree
+// object (`/Type /Pages ... /Count N`) rather than counting `/Type /Page`
+// occurrences — the latter can be hidden inside compressed object streams,
+// while a stock pdflatex build keeps the page-tree object itself in plain
+// text. Returns null if it can't be found confidently; callers should treat
+// that as "unknown, skip the check" rather than assuming a single page.
+function countPdfPages(pdf: Buffer): number | null {
+  const text = pdf.toString("latin1");
+  const typeIdx = text.search(/\/Type\s*\/Pages\b/);
+  if (typeIdx === -1) return null;
+  const match = text.slice(typeIdx, typeIdx + 500).match(/\/Count\s+(\d+)/);
+  if (!match) return null;
+  const count = Number(match[1]);
+  return Number.isFinite(count) && count > 0 ? count : null;
+}
+
 // --- Profile ---------------------------------------------------------------
 
 resumeRouter.get("/profile", async (req: Request, res: Response) => {
   const { userId } = req as AuthRequest;
-  const profile = await prisma.resumeProfile.findUnique({ where: { userId } });
-  res.json(profile ?? EMPTY_PROFILE);
+  const profileRow = await prisma.resumeProfile.findUnique({ where: { userId } });
+  if (!profileRow) {
+    res.json(EMPTY_PROFILE);
+    return;
+  }
+  // Run stored data back through the schema so legacy shapes (old contact
+  // links, old free-text project descriptions) come back normalized to the
+  // current shape instead of whatever was last written to the DB.
+  const normalized = profileSchema.parse(profileRow);
+  res.json({ id: profileRow.id, ...normalized, updatedAt: profileRow.updatedAt });
 });
 
 resumeRouter.put("/profile", async (req: Request, res: Response) => {
@@ -91,6 +121,54 @@ resumeRouter.put("/profile", async (req: Request, res: Response) => {
     update: { ...parsed.data },
   });
   res.json(profile);
+});
+
+const importSchema = z.object({
+  rawText: z.string().min(1),
+  mode: z.enum(["holistic", "one-page"]),
+});
+
+// Onboarding: extract a pasted CV/resume's content into the profile's shape
+// and save it. Used once, on an empty profile, so a straight replace is safe
+// — nothing manual gets overwritten.
+resumeRouter.post("/profile/import", async (req: Request, res: Response) => {
+  const { userId } = req as AuthRequest;
+  const parsed = importSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0].message });
+    return;
+  }
+
+  let extracted;
+  try {
+    extracted = await importResumeText(parsed.data);
+  } catch (err) {
+    if (err instanceof LlmGenerationError) {
+      res.status(502).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+
+  const profile = await prisma.resumeProfile.upsert({
+    where: { userId },
+    create: { userId, ...extracted },
+    update: { ...extracted },
+  });
+
+  res.status(201).json({
+    ...profile,
+    counts: {
+      contact: extracted.contact.length,
+      summary: extracted.summary.length,
+      skills: extracted.skills.length,
+      experience: extracted.experience.length,
+      research: extracted.research.length,
+      projects: extracted.projects.length,
+      involvement: extracted.involvement.length,
+      education: extracted.education.length,
+    },
+  });
 });
 
 // --- Templates -----------------------------------------------------------------
@@ -300,14 +378,20 @@ resumeRouter.post("/generate", async (req: Request, res: Response) => {
     throw err;
   }
 
-  // Best-effort: verify the output compiles, with one AI repair attempt.
+  // Best-effort: verify the output compiles and fits on one page. Each check
+  // gets a single AI-driven fix attempt; a fix is only adopted if it still
+  // compiles, so a failed fix attempt never regresses a working version.
   try {
     let compiled = await compileLatex(latexSource);
+
     if (!compiled.ok) {
       try {
         const repaired = await repairResumeLatex({ latexSource, compileLog: compiled.log });
-        latexSource = repaired.latexSource;
-        compiled = await compileLatex(latexSource);
+        const recompiled = await compileLatex(repaired.latexSource);
+        if (recompiled.ok) {
+          latexSource = repaired.latexSource;
+          compiled = recompiled;
+        }
       } catch {
         // keep the pre-repair source
       }
@@ -315,6 +399,31 @@ resumeRouter.post("/generate", async (req: Request, res: Response) => {
         warnings.push(
           'The generated LaTeX did not compile cleanly. Open "Edit LaTeX" to fix it — the compiler error shows in the preview pane.',
         );
+      }
+    }
+
+    if (compiled.ok) {
+      const pageCount = countPdfPages(compiled.pdf);
+      if (pageCount !== null && pageCount > 1) {
+        try {
+          const trimmed = await trimResumeToOnePage({ latexSource, pageCount });
+          const recompiled = await compileLatex(trimmed.latexSource);
+          if (recompiled.ok) {
+            latexSource = trimmed.latexSource;
+            const trimmedCount = countPdfPages(recompiled.pdf);
+            if (trimmedCount !== null && trimmedCount > 1) {
+              warnings.push(
+                `The resume still runs onto ${trimmedCount} pages after an automatic trim — open "Edit LaTeX" to cut it down further.`,
+              );
+            }
+          } else {
+            warnings.push(
+              `The resume runs onto ${pageCount} pages and the automatic trim didn't compile — open "Edit LaTeX" to shorten it by hand.`,
+            );
+          }
+        } catch {
+          warnings.push(`The resume runs onto ${pageCount} pages — open "Edit LaTeX" to shorten it by hand.`);
+        }
       }
     }
   } catch {

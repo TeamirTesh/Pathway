@@ -48,7 +48,9 @@ export interface ResumeTemplate {
   builtin: boolean;
 }
 
-export interface ContactLink {
+// Shared { url, label } shape for any hyperlink on the profile — contact
+// links and, below, per-project links.
+export interface ProfileLink {
   url: string;
   label: string;
 }
@@ -58,7 +60,7 @@ export interface ContactVariant {
   name: string;
   email: string;
   phone: string;
-  links: ContactLink[];
+  links: ProfileLink[];
   location: string;
   title: string;
 }
@@ -92,7 +94,9 @@ export interface ResearchEntry {
 
 export interface ProjectEntry {
   name: string;
-  description: string;
+  techStack: string;
+  links: ProfileLink[];
+  bullets: string[];
 }
 
 export interface InvolvementEntry {
@@ -111,13 +115,7 @@ export interface EducationEntry {
 }
 
 export type SectionKind =
-  | "summary"
-  | "education"
-  | "experience"
-  | "projects"
-  | "skills"
-  | "involvement"
-  | "research";
+  "summary" | "education" | "experience" | "projects" | "skills" | "involvement" | "research";
 
 export interface SectionMeta {
   kind: SectionKind;
@@ -148,19 +146,16 @@ export const api = {
     login: (body: { email: string; password: string }) =>
       request<{ user: User }>("/api/auth/login", { method: "POST", body: JSON.stringify(body) }),
 
-    logout: () =>
-      request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+    logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
 
-    me: () =>
-      request<User>("/api/auth/me"),
+    me: () => request<User>("/api/auth/me"),
 
     googleUrl: () => `${BASE}/api/auth/google`,
   },
 
   gmail: {
     connectUrl: () => `${BASE}/api/gmail/connect`,
-    disconnect: () =>
-      request<{ ok: boolean }>("/api/gmail/disconnect", { method: "DELETE" }),
+    disconnect: () => request<{ ok: boolean }>("/api/gmail/disconnect", { method: "DELETE" }),
   },
 
   users: {
@@ -168,12 +163,14 @@ export const api = {
       request<User>("/api/users/me", { method: "PATCH", body: JSON.stringify(body) }),
 
     changePassword: (body: { currentPassword?: string; newPassword: string }) =>
-      request<{ ok: boolean }>("/api/users/me/password", { method: "PATCH", body: JSON.stringify(body) }),
+      request<{ ok: boolean }>("/api/users/me/password", {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
 
-    deleteMe: () =>
-      request<{ ok: boolean }>("/api/users/me", { method: "DELETE" }),
+    deleteMe: () => request<{ ok: boolean }>("/api/users/me", { method: "DELETE" }),
   },
-  
+
   applications: {
     list: (params?: { search?: string; stage?: string }) => {
       const qs = new URLSearchParams();
@@ -213,27 +210,43 @@ export const api = {
     create: (body: { label: string; latexSource: string; targetRole?: string }) =>
       request<ResumeVersion>("/api/resume", { method: "POST", body: JSON.stringify(body) }),
 
-    update: (id: string, body: Partial<{ label: string; latexSource: string; targetRole: string }>) =>
+    update: (
+      id: string,
+      body: Partial<{ label: string; latexSource: string; targetRole: string }>,
+    ) =>
       request<ResumeVersion>(`/api/resume/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
 
-    remove: (id: string) =>
-      request<{ ok: boolean }>(`/api/resume/${id}`, { method: "DELETE" }),
+    remove: (id: string) => request<{ ok: boolean }>(`/api/resume/${id}`, { method: "DELETE" }),
 
     templates: {
       list: () => request<ResumeTemplate[]>("/api/resume/templates"),
 
       create: (body: { name: string; latexSource: string }) =>
-        request<ResumeTemplate>("/api/resume/templates", { method: "POST", body: JSON.stringify(body) }),
+        request<ResumeTemplate>("/api/resume/templates", {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
 
       update: (id: string, body: Partial<{ name: string; latexSource: string }>) =>
-        request<ResumeTemplate>(`/api/resume/templates/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+        request<ResumeTemplate>(`/api/resume/templates/${id}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        }),
 
       remove: (id: string) =>
         request<{ ok: boolean }>(`/api/resume/templates/${id}`, { method: "DELETE" }),
     },
 
-    generate: (body: { jobDescription: string; templateId: string; targetRole?: string; label?: string }) =>
-      request<ResumeVersion & { warnings: string[] }>("/api/resume/generate", { method: "POST", body: JSON.stringify(body) }),
+    generate: (body: {
+      jobDescription: string;
+      templateId: string;
+      targetRole?: string;
+      label?: string;
+    }) =>
+      request<ResumeVersion & { warnings: string[] }>("/api/resume/generate", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
 
     renderPdf: async (latex: string): Promise<Blob> => {
       const cookie = getIncomingCookieHeader();
@@ -256,5 +269,11 @@ export const api = {
 
     update: (body: Omit<ResumeProfile, "id" | "updatedAt">) =>
       request<ResumeProfile>("/api/resume/profile", { method: "PUT", body: JSON.stringify(body) }),
+
+    import: (body: { rawText: string; mode: "holistic" | "one-page" }) =>
+      request<ResumeProfile & { counts: Record<string, number> }>("/api/resume/profile/import", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
   },
 };

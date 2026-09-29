@@ -4,11 +4,11 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeft, ChevronDown, ChevronUp, Eye, EyeOff, Plus, Trash2, X } from "lucide-react";
 import {
   api,
-  ContactLink,
   ContactVariant,
   EducationEntry,
   ExperienceEntry,
   InvolvementEntry,
+  ProfileLink,
   ProjectEntry,
   ResearchEntry,
   ResumeProfile,
@@ -161,7 +161,10 @@ export function ResumeProfileEditor() {
         </p>
 
         <Section title="Contact">
-          <ContactVariantsEditor contact={form.contact} onChange={(contact) => setForm({ ...form, contact })} />
+          <ContactVariantsEditor
+            contact={form.contact}
+            onChange={(contact) => setForm({ ...form, contact })}
+          />
         </Section>
 
         {sections.map((meta, idx) => (
@@ -193,14 +196,16 @@ export function ResumeProfileEditor() {
               />
             )}
             {meta.kind === "projects" && (
-              <NameDescriptionEditor
-                entryLabel="project"
-                entries={form.projects}
+              <ProjectsEditor
+                projects={form.projects}
                 onChange={(projects) => setForm({ ...form, projects })}
               />
             )}
             {meta.kind === "skills" && (
-              <SkillsEditor skills={form.skills} onChange={(skills) => setForm({ ...form, skills })} />
+              <SkillsEditor
+                skills={form.skills}
+                onChange={(skills) => setForm({ ...form, skills })}
+              />
             )}
             {meta.kind === "involvement" && (
               <NameDescriptionEditor
@@ -382,7 +387,9 @@ function SkillsEditor({
   const addItem = (i: number, item: string) =>
     onChange(updateAt(skills, i, { ...skills[i], items: [...skills[i].items, item] }));
   const removeItem = (i: number, j: number) =>
-    onChange(updateAt(skills, i, { ...skills[i], items: skills[i].items.filter((_, idx) => idx !== j) }));
+    onChange(
+      updateAt(skills, i, { ...skills[i], items: skills[i].items.filter((_, idx) => idx !== j) }),
+    );
 
   return (
     <div className="space-y-3">
@@ -439,12 +446,11 @@ function ContactVariantsEditor({
   const removeVariant = (i: number) => onChange(removeAt(contact, i));
   const moveVariant = (from: number, to: number) => onChange(move(contact, from, to));
 
-  const links = (i: number): ContactLink[] => contact[i].links ?? [];
+  const links = (i: number): ProfileLink[] => contact[i].links ?? [];
   const addLink = (i: number) => updateVariant(i, { links: [...links(i), { url: "", label: "" }] });
-  const updateLink = (i: number, li: number, patch: Partial<ContactLink>) =>
+  const updateLink = (i: number, li: number, patch: Partial<ProfileLink>) =>
     updateVariant(i, { links: updateAt(links(i), li, { ...links(i)[li], ...patch }) });
-  const removeLink = (i: number, li: number) =>
-    updateVariant(i, { links: removeAt(links(i), li) });
+  const removeLink = (i: number, li: number) => updateVariant(i, { links: removeAt(links(i), li) });
   const moveLink = (i: number, from: number, to: number) =>
     updateVariant(i, { links: move(links(i), from, to) });
 
@@ -622,7 +628,8 @@ function ExperienceEditor({
   experience: ExperienceEntry[];
   onChange: (experience: ExperienceEntry[]) => void;
 }) {
-  const addEntry = () => onChange([...experience, { org: "", location: "", role: "", date: "", bullets: [] }]);
+  const addEntry = () =>
+    onChange([...experience, { org: "", location: "", role: "", date: "", bullets: [] }]);
   const updateEntry = (i: number, patch: Partial<ExperienceEntry>) =>
     onChange(updateAt(experience, i, { ...experience[i], ...patch }));
   const removeEntry = (i: number) => onChange(removeAt(experience, i));
@@ -706,7 +713,8 @@ function ResearchEditor({
   research: ResearchEntry[];
   onChange: (research: ResearchEntry[]) => void;
 }) {
-  const addEntry = () => onChange([...research, { org: "", location: "", role: "", title: "", description: "" }]);
+  const addEntry = () =>
+    onChange([...research, { org: "", location: "", role: "", title: "", description: "" }]);
   const updateEntry = (i: number, patch: Partial<ResearchEntry>) =>
     onChange(updateAt(research, i, { ...research[i], ...patch }));
   const removeEntry = (i: number) => onChange(removeAt(research, i));
@@ -772,11 +780,11 @@ function NameDescriptionEditor({
   onChange,
 }: {
   entryLabel: string;
-  entries: (ProjectEntry | InvolvementEntry)[];
-  onChange: (entries: (ProjectEntry | InvolvementEntry)[]) => void;
+  entries: InvolvementEntry[];
+  onChange: (entries: InvolvementEntry[]) => void;
 }) {
   const addEntry = () => onChange([...entries, { name: "", description: "" }]);
-  const updateEntry = (i: number, patch: Partial<ProjectEntry>) =>
+  const updateEntry = (i: number, patch: Partial<InvolvementEntry>) =>
     onChange(updateAt(entries, i, { ...entries[i], ...patch }));
   const removeEntry = (i: number) => onChange(removeAt(entries, i));
   const moveEntry = (from: number, to: number) => onChange(move(entries, from, to));
@@ -815,6 +823,140 @@ function NameDescriptionEditor({
   );
 }
 
+function ProjectsEditor({
+  projects,
+  onChange,
+}: {
+  projects: ProjectEntry[];
+  onChange: (projects: ProjectEntry[]) => void;
+}) {
+  const addEntry = () =>
+    onChange([...projects, { name: "", techStack: "", links: [], bullets: [] }]);
+  const updateEntry = (i: number, patch: Partial<ProjectEntry>) =>
+    onChange(updateAt(projects, i, { ...projects[i], ...patch }));
+  const removeEntry = (i: number) => onChange(removeAt(projects, i));
+  const moveEntry = (from: number, to: number) => onChange(move(projects, from, to));
+
+  const addBullet = (i: number) => updateEntry(i, { bullets: [...projects[i].bullets, ""] });
+  const updateBullet = (i: number, j: number, value: string) =>
+    updateEntry(i, { bullets: updateAt(projects[i].bullets, j, value) });
+  const removeBullet = (i: number, j: number) =>
+    updateEntry(i, { bullets: projects[i].bullets.filter((_, idx) => idx !== j) });
+
+  const links = (i: number): ProfileLink[] => projects[i].links ?? [];
+  const addLink = (i: number) => updateEntry(i, { links: [...links(i), { url: "", label: "" }] });
+  const updateLink = (i: number, li: number, patch: Partial<ProfileLink>) =>
+    updateEntry(i, { links: updateAt(links(i), li, { ...links(i)[li], ...patch }) });
+  const removeLink = (i: number, li: number) => updateEntry(i, { links: removeAt(links(i), li) });
+  const moveLink = (i: number, from: number, to: number) =>
+    updateEntry(i, { links: move(links(i), from, to) });
+
+  return (
+    <div className="space-y-4">
+      {projects.map((entry, i) => (
+        <div key={i} className="rounded-md border border-border bg-background p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="grid flex-1 grid-cols-2 gap-2">
+              <input
+                className="input"
+                placeholder="Project title"
+                value={entry.name}
+                onChange={(e) => updateEntry(i, { name: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Tech stack (comma-separated, e.g. React, Node.js, PostgreSQL)"
+                value={entry.techStack}
+                onChange={(e) => updateEntry(i, { techStack: e.target.value })}
+              />
+            </div>
+            <EntryControls
+              index={i}
+              count={projects.length}
+              onMove={moveEntry}
+              onRemove={() => removeEntry(i)}
+            />
+          </div>
+
+          <div className="mt-3 space-y-1.5">
+            <Mono dim>Links</Mono>
+            {(entry.links ?? []).map((lnk, li) => (
+              <div key={li} className="flex items-center gap-1.5">
+                <input
+                  className="input flex-1"
+                  placeholder="URL (e.g. https://github.com/you/project)"
+                  value={lnk.url}
+                  onChange={(e) => updateLink(i, li, { url: e.target.value })}
+                />
+                <input
+                  className="input flex-1"
+                  placeholder="Display text (e.g. GitHub)"
+                  value={lnk.label}
+                  onChange={(e) => updateLink(i, li, { label: e.target.value })}
+                />
+                <div className="flex shrink-0 items-center gap-0.5">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    disabled={li === 0}
+                    onClick={() => moveLink(i, li, li - 1)}
+                    aria-label="Move link up"
+                  >
+                    <ChevronUp className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    disabled={li === (entry.links ?? []).length - 1}
+                    onClick={() => moveLink(i, li, li + 1)}
+                    aria-label="Move link down"
+                  >
+                    <ChevronDown className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => removeLink(i, li)}
+                    aria-label="Remove link"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button type="button" onClick={() => addLink(i)} className="add-btn">
+              <Plus className="size-3" /> Add link
+            </button>
+          </div>
+
+          <div className="mt-3 space-y-1.5">
+            <Mono dim>Bullets</Mono>
+            {entry.bullets.map((b, j) => (
+              <div key={j} className="flex items-center gap-1.5">
+                <input
+                  className="input flex-1"
+                  placeholder="Bullet"
+                  value={b}
+                  onChange={(e) => updateBullet(i, j, e.target.value)}
+                />
+                <button onClick={() => removeBullet(i, j)} className="icon-btn">
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ))}
+            <button onClick={() => addBullet(i)} className="add-btn">
+              <Plus className="size-3" /> Add bullet
+            </button>
+          </div>
+        </div>
+      ))}
+      <button onClick={addEntry} className="add-btn">
+        <Plus className="size-3.5" /> Add project
+      </button>
+    </div>
+  );
+}
+
 function EducationEditor({
   education,
   onChange,
@@ -823,7 +965,10 @@ function EducationEditor({
   onChange: (education: EducationEntry[]) => void;
 }) {
   const addEntry = () =>
-    onChange([...education, { school: "", location: "", degree: "", date: "", gpa: "", honors: "", coursework: "" }]);
+    onChange([
+      ...education,
+      { school: "", location: "", degree: "", date: "", gpa: "", honors: "", coursework: "" },
+    ]);
   const updateEntry = (i: number, patch: Partial<EducationEntry>) =>
     onChange(updateAt(education, i, { ...education[i], ...patch }));
   const removeEntry = (i: number) => onChange(removeAt(education, i));

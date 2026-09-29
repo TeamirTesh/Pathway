@@ -1,6 +1,8 @@
 import { z } from "zod";
 
-export const contactLinkSchema = z.object({
+// Shared { url, label } shape for any hyperlink stored on the profile —
+// contact links (LinkedIn, GitHub, …) and, below, per-project links.
+export const linkSchema = z.object({
   url: z.string().default(""),
   label: z.string().default(""),
 });
@@ -12,7 +14,7 @@ const contactVariantRawSchema = z.object({
   name: z.string(),
   email: z.string(),
   phone: z.string(),
-  links: z.array(contactLinkSchema).default([]),
+  links: z.array(linkSchema).default([]),
   link: z.string().nullable().optional(),
   linkDisplay: z.string().optional(),
   location: z.string(),
@@ -56,10 +58,26 @@ export const researchEntrySchema = z.object({
   description: z.string(),
 });
 
-// No dates/org/location — matches base.tex's Projects section.
-export const projectEntrySchema = z.object({
+// Structured project shape (title / tech stack / links / bullets) instead of
+// a free-text description — this lets resume generation place each field
+// mechanically (e.g. straight into \resumeProjectHeading + \resumeItem calls)
+// rather than asking the model to invent formatting for a paragraph.
+const projectEntryRawSchema = z.object({
   name: z.string(),
-  description: z.string(),
+  techStack: z.string().default(""),
+  links: z.array(linkSchema).default([]),
+  bullets: z.array(z.string()).default([]),
+  // Legacy field from the old free-text shape — folded into `bullets` below
+  // so existing stored projects don't lose their content after this change.
+  description: z.string().optional(),
+});
+
+export const projectEntrySchema = projectEntryRawSchema.transform((p) => {
+  const { description, ...rest } = p;
+  return {
+    ...rest,
+    bullets: rest.bullets.length > 0 ? rest.bullets : description ? [description] : [],
+  };
 });
 
 // Same minimal shape as projects.
@@ -122,7 +140,7 @@ export const PROFILE_CONTENT_KEYS = [
   "education",
 ] as const;
 
-export type ContactLink = z.infer<typeof contactLinkSchema>;
+export type LinkEntry = z.infer<typeof linkSchema>;
 export type ContactVariant = z.infer<typeof contactVariantSchema>;
 export type SummaryVariant = z.infer<typeof summaryVariantSchema>;
 export type SkillCategory = z.infer<typeof skillCategorySchema>;

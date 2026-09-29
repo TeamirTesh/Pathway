@@ -1,5 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { ResumeProfileData } from "./resumeSchemas";
+import { importedProfileSchema, ImportedProfile } from "./resumeImportSchema";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-5";
@@ -18,6 +20,17 @@ TEMPLATE FIDELITY
 - Build each entry with the same custom commands the template uses (e.g. \\resumeSubheading, \\resumeProjectHeading, \\resumeItem, the itemize wrappers). Match its structure for the header, section headings, and spacing.
 - The output must compile with pdflatex with no changes.
 
+STRUCTURAL CONSISTENCY — the same field must look the same everywhere
+- Once you decide how to lay out a piece of repeatable, optional data within one entry of a section, use that EXACT same layout for every other entry in that section that has the same data. Never improvise a different arrangement for a later entry of the same kind.
+- Concrete example: say you place a degree's GPA at the right edge of the same row as the school/degree line — right-aligned, on the same line, without pushing the left-aligned school/degree text onto a new line. If the profile has two degrees and both have a GPA, the second (e.g. a Master's, even if it comes first or second in the list) must use that identical right-aligned-same-line placement too — not a bullet point, not a new line, not omitted. Whatever pattern you invent for the first instance of a field is now the pattern for every instance of that field in that section.
+- This applies to every optional/repeated field across parallel entries, not just GPA: honors, coursework, dates, location, tech stack, links, etc. Pick one structural treatment per field per section and repeat it verbatim.
+
+LENGTH — fill one page, never overflow
+- The document must render to exactly one page. You will not see the compiled output, so this is the single most important constraint to self-check before finishing: mentally estimate how much vertical space your selected content will take at the template's own font size and margins, and cut content if you're not confident it fits.
+- A one-page resume that looks sparse is a worse outcome than a tight one, but overflowing to a second page is the worse failure of the two — if you're unsure whether something fits, lean toward including one fewer bullet or entry rather than risking overflow.
+- When the profile has enough relevant material and there's room, use the higher end of the ranges in SELECTION GUIDANCE (more bullets, more entries) so the page reads as full and substantial rather than sparse; use the lower end when there isn't.
+- Never shrink the font size, margins, or any spacing command the template defines to force more content onto the page — control length by choosing how much content to include, not by altering the template's layout.
+
 CONTENT RULES — never invent facts
 - Every company, role, title, date, school, degree, project name, and bullet fact must come from the profile. Do not invent, embellish, or change numbers.
 - You may omit, reorder, and lightly condense. You may NOT add.
@@ -26,7 +39,11 @@ CONTENT RULES — never invent facts
 
 SELECTION GUIDANCE
 - experience: keep the 3-5 most relevant roles, 2-4 bullets each — the ones that match the job.
-- projects: the 2-3 most relevant.
+- projects: the 2-3 most relevant. Each has { name, techStack, links, bullets } — do not merge these into
+  a paragraph. Render techStack next to the name the way the template's project heading already does
+  (e.g. "\\textbf{name} $|$ \\emph{techStack}"), render each link the same way the template renders
+  contact links, and drop each bullet in as its own \\resumeItem — select the most relevant few, but
+  don't rewrite their wording.
 - skills: only categories and items relevant to the job.
 - research: include only if the job relates to research/security/policy/academia.
 - involvement / leadership: include only if relevant.
@@ -111,7 +128,45 @@ export async function generateTailoredResume(input: {
   return { jobTitle, latexSource };
 }
 
-const REPAIR_SYSTEM_PROMPT = `You are a LaTeX repair tool. You are given a resume .tex document that failed to compile with pdflatex, plus the compiler log. Return a corrected version of the COMPLETE document that compiles cleanly. Change as little as possible — fix only what the log points at. Do not alter the wording of resume content. Output only the LaTeX document, starting with \\documentclass, no code fences, no commentary.`;
+const IMPORT_SYSTEM_PROMPT = `You extract structured resume data from raw pasted text (copied from a PDF, Word doc, or plain-text resume/CV). You will also be told whether the source is a "holistic" CV (meant to list everything the person has done) or a "one-page" resume (already trimmed down to their most relevant highlights for one target role).
+
+Rules:
+- Extract only what is actually written. Never invent a company, title, date, school, number, or bullet that isn't in the source text.
+- Do not summarize or shorten bullets — carry them over close to verbatim, only cleaning up obvious copy/paste artifacts (stray line breaks, bullet glyphs, page numbers).
+- If a field isn't present in the source (e.g. no GPA, no phone number), leave it as an empty string rather than guessing.
+- Group flat skill lists into sensible categories (e.g. "Languages", "Frameworks", "Tools") based on how they're presented; if the source already has categories, keep them.
+- contact: extract exactly one contact entry from the source (name, email, phone, location, title/headline if present, and every link — LinkedIn, GitHub, portfolio, etc. — each as its own { url, label } in "links").
+- summary: if the source has an objective/summary paragraph, include it verbatim as one entry with key "main" and label "Summary". If there isn't one, return an empty array — do not invent one.
+- projects: split each into { name, techStack, links, bullets } — don't leave it as one paragraph. "techStack" is usually the tech list next to the project name (often after a "|" or in italics/parentheses) as a single comma-separated line; "links" is any GitHub/demo/live-site link attached to that project; "bullets" is each distinct point about the project as its own array entry, not one merged description.
+- Every array field defaults to empty if that section isn't present in the source. Return every section key even if empty.`;
+
+export async function importResumeText(input: {
+  rawText: string;
+  mode: "holistic" | "one-page";
+}): Promise<ImportedProfile> {
+  const response = await client.messages.parse({
+    model: MODEL,
+    max_tokens: 8000,
+    output_config: { format: zodOutputFormat(importedProfileSchema) },
+    system: IMPORT_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: `This is a ${input.mode === "holistic" ? "holistic CV meant to list everything the person has done" : "one-page resume already trimmed to one target role — it likely does not represent everything the person has done"}. Extract its content.\n\nRAW TEXT:\n${input.rawText}`,
+      },
+    ],
+  });
+
+  if (response.stop_reason === "refusal") {
+    throw new LlmGenerationError("The model declined to read this document.");
+  }
+  if (!response.parsed_output) {
+    throw new LlmGenerationError("Couldn't extract structured data from that text — try pasting it again.");
+  }
+  return response.parsed_output;
+}
+
+const REPAIR_SYSTEM_PROMPT =`You are a LaTeX repair tool. You are given a resume .tex document that failed to compile with pdflatex, plus the compiler log. Return a corrected version of the COMPLETE document that compiles cleanly. Change as little as possible — fix only what the log points at. Do not alter the wording of resume content. Output only the LaTeX document, starting with \\documentclass, no code fences, no commentary.`;
 
 export async function repairResumeLatex(input: {
   latexSource: string;
@@ -125,6 +180,34 @@ export async function repairResumeLatex(input: {
       {
         role: "user",
         content: `COMPILER LOG:\n${input.compileLog.slice(0, 6000)}\n\nDOCUMENT:\n${input.latexSource}`,
+      },
+    ],
+  });
+
+  const latexSource = stripFences(extractText(response));
+  assertUsableLatex(latexSource);
+  return { latexSource };
+}
+
+const TRIM_SYSTEM_PROMPT = `You are given a resume .tex document that compiled successfully but rendered onto more than one page — it must fit exactly one. Shorten it until it fits:
+- Cut whole bullets or whole entries (the least job-relevant ones) before you touch wording. Only tighten a bullet's wording as a last resort, and only if it doesn't change any fact.
+- Do not change \\documentclass, the \\usepackage list, margins, font size, or any \\newcommand/\\renewcommand — the layout itself must stay identical to the input; only the amount of content changes.
+- Do not invent content to pad anything back out.
+- Keep every structural pattern (e.g. how optional fields like GPA are positioned) exactly as it already is in the input for the entries you keep.
+Output only the complete corrected LaTeX document, starting with \\documentclass, no code fences, no commentary.`;
+
+export async function trimResumeToOnePage(input: {
+  latexSource: string;
+  pageCount: number;
+}): Promise<{ latexSource: string }> {
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 8000,
+    system: TRIM_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: `This document currently renders as ${input.pageCount} pages. Cut it down to fit exactly 1 page.\n\nDOCUMENT:\n${input.latexSource}`,
       },
     ],
   });
